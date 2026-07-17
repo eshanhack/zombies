@@ -26,10 +26,14 @@ window.addEventListener('error', (event) => window.__consoleErrors.push(event.me
 window.addEventListener('unhandledrejection', (event) => window.__consoleErrors.push(String(event.reason)));
 
 const seed = parseSeed(window.location.search);
+const savedSettings = loadSettings();
 const app = document.querySelector<HTMLElement>('#app');
 if (app === null) throw new Error('Application mount point is missing.');
 
 const scene = new PreludeScene(seed);
+scene.setFieldOfView(savedSettings.fov);
+scene.setSensitivityMultiplier(savedSettings.sensitivity);
+scene.setMasterVolume(savedSettings.volume);
 app.append(scene.canvas);
 
 let activeSeed = seed;
@@ -65,8 +69,8 @@ const getSnapshot = (): GameSnapshot => {
       shots: simulation?.stats.shots ?? 0,
       hits: simulation?.stats.hits ?? 0,
       pointsEarned: simulation?.stats.pointsEarned ?? 0,
-      doorsOpened: 0,
-      crateRolls: 0,
+      doorsOpened: simulation?.stats.doorsOpened ?? 0,
+      crateRolls: simulation?.stats.crateRolls ?? 0,
       revives: 0,
       downs: 0,
     },
@@ -176,10 +180,25 @@ const shell = new AppShell(seed, scene, {
   },
   onSetting(setting, value) {
     if (setting === 'volume') scene.setMasterVolume(value);
+    if (setting === 'fov') scene.setFieldOfView(value);
+    if (setting === 'sensitivity') scene.setSensitivityMultiplier(value);
+  },
+  onRestart() {
+    if (activeMode === 'solo') {
+      activePhase = 'playing';
+      scene.restartSolo(activeSeed);
+      shell.resetForRestart();
+      return;
+    }
+    window.location.reload();
   },
 }, coop.hasResumeToken());
 app.append(shell.root);
 shell.setSnapshotProvider(getSnapshot);
+const syncNetworkAvailability = (): void => shell.setNetworkAvailability(navigator.onLine);
+syncNetworkAvailability();
+window.addEventListener('online', syncNetworkAvailability);
+window.addEventListener('offline', syncNetworkAvailability);
 coop.onLobbyChange(renderLobby);
 coop.onMovement((local, players) => {
   if (local !== null) scene.reconcileLocalPlayer(local);
@@ -196,17 +215,42 @@ window.__STAHLBUNKER_DEBUG__ = {
 };
 
 scene.start();
-registerSW({
-  immediate: true,
-  onRegisteredSW() {
-    shell.setOfflineStatus('ready');
-  },
-  onRegisterError(error) {
-    shell.setOfflineStatus('failed');
-    window.__consoleErrors.push(`Service worker: ${String(error)}`);
-  },
-});
-if (!('serviceWorker' in navigator)) shell.setOfflineStatus(import.meta.env.DEV ? 'dev bypass' : 'unsupported');
+const bootScreen = document.querySelector<HTMLElement>('#boot-screen');
+if (bootScreen !== null) {
+  document.documentElement.style.setProperty('--boot-fade-ms', `${CONFIG.presentation.bootFadeMs}ms`);
+  requestAnimationFrame(() => {
+    bootScreen.classList.add('is-ready');
+    window.setTimeout(() => bootScreen.remove(), CONFIG.presentation.bootFadeMs);
+  });
+}
+if (import.meta.env.DEV) {
+  shell.setOfflineStatus('dev bypass');
+} else {
+  const controlledAtBoot = 'serviceWorker' in navigator && navigator.serviceWorker.controller !== null;
+  let refreshedForServiceWorkerUpdate = false;
+  if ('serviceWorker' in navigator) {
+    navigator.serviceWorker.addEventListener('controllerchange', () => {
+      if (!controlledAtBoot || refreshedForServiceWorkerUpdate) return;
+      refreshedForServiceWorkerUpdate = true;
+      if (scene.isGameplay()) {
+        shell.setOfflineStatus('update ready · reload after run');
+        return;
+      }
+      window.location.reload();
+    });
+  }
+  registerSW({
+    immediate: true,
+    onRegisteredSW() {
+      shell.setOfflineStatus('ready');
+    },
+    onRegisterError(error) {
+      shell.setOfflineStatus('failed');
+      window.__consoleErrors.push(`Service worker: ${String(error)}`);
+    },
+  });
+  if (!('serviceWorker' in navigator)) shell.setOfflineStatus('unsupported');
+}
 
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) return;
@@ -217,4 +261,18 @@ void CONFIG;
 
 function normalizeRoom(value: string): RoomId {
   return value === 'armory' || value === 'generator' || value === 'catwalk' ? value : 'start';
+}
+
+function loadSettings(): { fov: number; sensitivity: number; volume: number } {
+  try {
+    const raw = localStorage.getItem(CONFIG.storage.settingsKey);
+    const value = raw === null ? {} : JSON.parse(raw) as { fov?: number; sensitivity?: number; volume?: number };
+    return {
+      fov: Math.max(65, Math.min(90, Number(value.fov ?? CONFIG.player.fovDeg))),
+      sensitivity: Math.max(0.5, Math.min(2, Number(value.sensitivity ?? 1))),
+      volume: Math.max(0, Math.min(1, Number(value.volume ?? CONFIG.audio.masterGain))),
+    };
+  } catch {
+    return { fov: CONFIG.player.fovDeg, sensitivity: 1, volume: CONFIG.audio.masterGain };
+  }
 }

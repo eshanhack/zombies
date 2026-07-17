@@ -97,6 +97,7 @@ export class NetPowerup extends Schema {
 }
 
 export class BunkerState extends Schema {
+  @type('uint16') protocolVersion: number = CONFIG.coop.protocolVersion;
   @type('uint32') seed: number = CONFIG.simulation.seedFallback;
   @type('string') roomCode: string = '';
   @type('string') hostId: string = '';

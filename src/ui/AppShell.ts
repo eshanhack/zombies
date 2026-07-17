@@ -1,9 +1,20 @@
 import { CONFIG } from '../config';
 import type { GameSnapshot } from '../shared/types';
-import type { PreludeScene } from '../game/PreludeScene';
+import type { PreludeScene, SceneSimulationReadout } from '../game/PreludeScene';
 import type { LobbyView } from '../network/CoopClient';
 
 type MenuAction = 'solo' | 'create' | 'join' | 'resume' | 'settings' | 'records';
+
+interface RunRecord {
+  round: number;
+  kills: number;
+  headshots: number;
+  accuracy: number;
+  pointsEarned: number;
+  doorsOpened: number;
+  crateRolls: number;
+  recordedAt: string;
+}
 
 export interface AppShellHandlers {
   onAction(action: MenuAction): void;
@@ -12,6 +23,7 @@ export interface AppShellHandlers {
   onStart(): void;
   onLeave(): Promise<void>;
   onSetting(setting: 'fov' | 'sensitivity' | 'volume', value: number): void;
+  onRestart(): void;
 }
 
 export class AppShell {
@@ -23,6 +35,7 @@ export class AppShell {
   private readonly settingsPanel: HTMLElement;
   private readonly recordsPanel: HTMLElement;
   private readonly lobbyPanel: HTMLElement;
+  private readonly gameOverPanel: HTMLElement;
   private readonly hud: HTMLElement;
   private readonly stamina: HTMLElement;
   private readonly interactionPrompt: HTMLElement;
@@ -39,12 +52,14 @@ export class AppShell {
   private readonly effectRow: HTMLElement;
   private readonly lifeOverlay: HTMLElement;
   private readonly powerStatus: HTMLElement;
+  private readonly networkStatus: HTMLElement;
   private readonly roundCanvas: HTMLCanvasElement;
   private readonly lockPrompt: HTMLButtonElement;
   private readonly controllerValue: HTMLElement;
   private readonly handlers: AppShellHandlers;
   private snapshotProvider: () => GameSnapshot | null = () => null;
   private displayedRound = -1;
+  private gameOverShown = false;
 
   constructor(seed: number, scene: PreludeScene, handlers: AppShellHandlers, resumeAvailable = false) {
     this.handlers = handlers;
@@ -72,15 +87,17 @@ export class AppShell {
         <div><span>POWER</span><strong class="status-off">OFFLINE</strong></div>
         <div><span>SECTOR</span><strong>START HALL</strong></div>
         <div><span>WEATHER</span><strong>FOG / −6°C</strong></div>
+        <div><span>LINK</span><strong data-network-status>ONLINE</strong></div>
       </aside>
     `;
     this.powerStatus = this.root.querySelector('.status-rail strong') as HTMLElement;
+    this.networkStatus = this.root.querySelector('[data-network-status]') as HTMLElement;
 
     this.overlay = document.createElement('section');
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P7 PRODUCTION AUDIO</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P8 PRODUCTION ART</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -92,6 +109,7 @@ export class AppShell {
         <div><dt>Weapon</dt><dd data-debug="weapon">Melder · 8 / 32</dd></div>
         <div><dt>Barrier boards</dt><dd data-debug="barriers">0 / 0</dd></div>
         <div><dt>Enemy states</dt><dd data-debug="enemy-states">none</dd></div>
+        <div><dt>Character rigs</dt><dd data-debug="characters">not loaded</dd></div>
         <div><dt>Doors / crate / grenades</dt><dd data-debug="economy">0 · closed · 4</dd></div>
         <div><dt>Power / perks / effects</dt><dd data-debug="systems">OFF · 0 · none</dd></div>
         <div><dt>Round species</dt><dd data-debug="species">zombies</dd></div>
@@ -122,6 +140,10 @@ export class AppShell {
         <button data-debug-action="fire">Fire active weapon</button>
         <button data-debug-action="forgeview">Stage Forge visual gate</button>
         <button data-debug-action="audio">Run left/right breach cue</button>
+        <button data-debug-action="gallery">Stage character gallery</button>
+        <button data-debug-action="stress">Stage 24-enemy stress</button>
+        <button data-debug-action="tour">Cycle room visual tour</button>
+        <button data-debug-action="gameover">Stage game-over report</button>
       </div>
     `;
     this.metricValue = this.overlay.querySelector('[data-debug="metrics"]') as HTMLElement;
@@ -192,31 +214,36 @@ export class AppShell {
     `;
     this.root.append(this.joinPanel);
 
+    const savedSettings = this.loadSettings();
     this.settingsPanel = document.createElement('section');
     this.settingsPanel.className = 'modal-card is-hidden';
     this.settingsPanel.innerHTML = `
       <button type="button" class="modal-close" aria-label="Close">×</button>
       <p class="eyebrow">Field adjustments</p><h2>Settings</h2>
-      <label>Field of view <output>${CONFIG.player.fovDeg}°</output><input data-setting="fov" type="range" min="65" max="90" value="${CONFIG.player.fovDeg}" /></label>
-      <label>Mouse sensitivity <output>1.00</output><input data-setting="sensitivity" type="range" min="0.5" max="2" step="0.05" value="1" /></label>
-      <label>Master volume <output>72%</output><input data-setting="volume" type="range" min="0" max="1" step="0.01" value="${CONFIG.audio.masterGain}" /></label>
+      <label>Field of view <output>${savedSettings.fov}°</output><input data-setting="fov" type="range" min="65" max="90" value="${savedSettings.fov}" /></label>
+      <label>Mouse sensitivity <output>${savedSettings.sensitivity.toFixed(2)}</output><input data-setting="sensitivity" type="range" min="0.5" max="2" step="0.05" value="${savedSettings.sensitivity}" /></label>
+      <label>Master volume <output>${Math.round(savedSettings.volume * 100)}%</output><input data-setting="volume" type="range" min="0" max="1" step="0.01" value="${savedSettings.volume}" /></label>
     `;
     this.root.append(this.settingsPanel);
 
     this.recordsPanel = document.createElement('section');
-    this.recordsPanel.className = 'modal-card is-hidden';
-    const record = this.loadBestRound();
+    this.recordsPanel.className = 'modal-card records-card is-hidden';
     this.recordsPanel.innerHTML = `
       <button type="button" class="modal-close" aria-label="Close">×</button>
-      <p class="eyebrow">Recovered field report</p><h2>Records</h2>
-      <div class="record-number">${record}</div><p>Best round survived</p>
+      <div class="records-content"></div>
     `;
+    this.renderRecords();
     this.root.append(this.recordsPanel);
 
     this.lobbyPanel = document.createElement('section');
     this.lobbyPanel.className = 'lobby-card is-hidden';
     this.lobbyPanel.dataset.testid = 'coop-lobby';
     this.root.append(this.lobbyPanel);
+
+    this.gameOverPanel = document.createElement('section');
+    this.gameOverPanel.className = 'game-over-card is-hidden';
+    this.gameOverPanel.setAttribute('aria-live', 'assertive');
+    this.root.append(this.gameOverPanel);
 
     this.root.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((button) => {
       button.addEventListener('click', () => handlers.onAction(button.dataset.action as MenuAction));
@@ -248,15 +275,20 @@ export class AppShell {
         event.preventDefault();
         this.overlay.classList.toggle('is-hidden');
       }
+      if (event.code === 'KeyR' && this.gameOverShown) {
+        event.preventDefault();
+        this.handlers.onRestart();
+      }
     });
 
     window.setInterval(() => {
       const metrics = scene.getMetrics();
-      this.metricValue.textContent = `${metrics.fps} FPS · ${metrics.drawCalls} calls`;
+      this.metricValue.textContent = `${metrics.fps} FPS · ${metrics.drawCalls} calls · ${(metrics.triangles / 1000).toFixed(0)}k tris`;
       const snapshot = this.snapshotProvider();
       if (snapshot !== null) {
         this.renderSnapshot(snapshot);
         const combat = scene.getSimulationReadout();
+        if (combat?.gameOver && !this.gameOverShown) this.showGameOver(combat);
         const weapon = combat?.weapons[combat.activeWeaponIndex];
         const economy = this.overlay.querySelector<HTMLElement>('[data-debug="economy"]');
         if (economy !== null && combat !== null) economy.textContent = `${combat.openDoors.length} · ${combat.crate.phase} @ ${combat.crate.activeLocationId} · ${combat.grenades}`;
@@ -270,6 +302,11 @@ export class AppShell {
         }
         const species = this.overlay.querySelector<HTMLElement>('[data-debug="species"]');
         if (species !== null && combat !== null) species.textContent = `${combat.roundKind} · next wolves ${combat.nextWolfRound}`;
+        const character = scene.getCharacterDiagnostics();
+        const characterValue = this.overlay.querySelector<HTMLElement>('[data-debug="characters"]');
+        if (characterValue !== null && character !== null) {
+          characterValue.textContent = `${character.visible} visible · Z ${character.zombieBones}b/${character.zombieTriangles}t · W ${character.wolfBones}b/${character.wolfTriangles}t · ${character.silhouettes} silhouettes`;
+        }
         const audioDiagnostics = scene.getAudioDiagnostics();
         const audioValue = this.overlay.querySelector<HTMLElement>('[data-debug="audio"]');
         if (audioValue !== null) {
@@ -278,7 +315,12 @@ export class AppShell {
         const localization = this.overlay.querySelector<HTMLElement>('[data-debug="localization"]');
         if (localization !== null) localization.textContent = audioDiagnostics.localizationGate;
         const errors = this.overlay.querySelector<HTMLElement>('[data-debug="errors"]');
-        if (errors !== null) errors.textContent = String(window.__consoleErrors.length);
+        if (errors !== null) {
+          const latestError = window.__consoleErrors.at(-1);
+          errors.textContent = latestError === undefined
+            ? '0'
+            : `${window.__consoleErrors.length} · ${latestError.slice(0, 180)}`;
+        }
         this.pointsValue.textContent = String(combat?.points ?? snapshot.players[0]?.points ?? 0);
         if (weapon !== undefined) {
           this.weaponName.textContent = `${weapon.upgraded ? 'Über-' : ''}${CONFIG.weapons[weapon.id].name}`;
@@ -315,7 +357,7 @@ export class AppShell {
         const staminaPercent = controller.staminaMs / CONFIG.player.sprintMaxMs;
         this.stamina.style.setProperty('--stamina', `${Math.round(staminaPercent * 100)}%`);
         this.stamina.classList.toggle('is-active', controller.sprinting || controller.staminaMs < CONFIG.player.sprintMaxMs - CONFIG.controller.staminaDisplayEpsilonMs);
-        this.lockPrompt.classList.toggle('is-hidden', controller.locked);
+        this.lockPrompt.classList.toggle('is-hidden', controller.locked || scene.isDebugVisualGate());
         this.controllerValue.textContent = `${controller.x.toFixed(2)}, ${controller.y.toFixed(2)}, ${controller.z.toFixed(2)}${controller.noclip ? ' · NOCLIP' : ''}`;
       }
       const interaction = scene.getInteractionPrompt();
@@ -341,6 +383,7 @@ export class AppShell {
 
   openRecords(): void {
     this.closeModals();
+    this.renderRecords();
     this.recordsPanel.classList.remove('is-hidden');
   }
 
@@ -356,11 +399,31 @@ export class AppShell {
     if (value !== null) value.textContent = status;
   }
 
+  setNetworkAvailability(online: boolean): void {
+    this.networkStatus.textContent = online ? 'ONLINE' : 'OFFLINE · SOLO ONLY';
+    this.networkStatus.classList.toggle('status-off', !online);
+    for (const action of ['create', 'join', 'resume']) {
+      const button = this.root.querySelector<HTMLButtonElement>(`[data-action="${action}"]`);
+      if (button !== null) button.disabled = !online;
+    }
+  }
+
   startGameplay(): void {
     this.closeModals();
     this.hideLobby();
     this.root.classList.add('is-gameplay');
     this.hud.classList.remove('is-hidden');
+    this.lockPrompt.classList.remove('is-hidden');
+  }
+
+  resetForRestart(): void {
+    this.gameOverShown = false;
+    this.gameOverPanel.classList.add('is-hidden');
+    this.lifeOverlay.classList.add('is-hidden');
+    this.lifeOverlay.textContent = '';
+    this.displayedRound = -1;
+    this.drawRound(0, false);
+    this.pointLedger.replaceChildren();
     this.lockPrompt.classList.remove('is-hidden');
   }
 
@@ -496,7 +559,10 @@ export class AppShell {
         if (input.dataset.setting === 'sensitivity') output.value = Number(input.value).toFixed(2);
         if (input.dataset.setting === 'volume') output.value = `${Math.round(Number(input.value) * 100)}%`;
         const setting = input.dataset.setting;
-        if (setting === 'fov' || setting === 'sensitivity' || setting === 'volume') this.handlers.onSetting(setting, Number(input.value));
+        if (setting === 'fov' || setting === 'sensitivity' || setting === 'volume') {
+          this.persistSetting(setting, Number(input.value));
+          this.handlers.onSetting(setting, Number(input.value));
+        }
       });
     });
   }
@@ -516,12 +582,110 @@ export class AppShell {
   }
 
   private loadBestRound(): number {
+    return this.loadRecords().bestRound;
+  }
+
+  private loadRecords(): { bestRound: number; runs: RunRecord[] } {
     try {
       const stored = localStorage.getItem(CONFIG.storage.recordsKey);
-      if (stored === null) return 0;
-      return Number((JSON.parse(stored) as { bestRound?: number }).bestRound ?? 0);
+      if (stored === null) return { bestRound: 0, runs: [] };
+      const value = JSON.parse(stored) as { bestRound?: number; runs?: RunRecord[] };
+      return {
+        bestRound: Number(value.bestRound ?? 0),
+        runs: Array.isArray(value.runs) ? value.runs : [],
+      };
     } catch {
-      return 0;
+      return { bestRound: 0, runs: [] };
+    }
+  }
+
+  private renderRecords(): void {
+    const content = this.recordsPanel.querySelector<HTMLElement>('.records-content');
+    if (content === null) return;
+    const records = this.loadRecords();
+    const recent = [...records.runs].reverse().slice(0, 5);
+    const rows = recent.map((run, index) => {
+      const date = new Date(run.recordedAt);
+      const dateLabel = Number.isNaN(date.getTime())
+        ? `RUN ${records.runs.length - index}`
+        : date.toLocaleDateString(undefined, { month: 'short', day: '2-digit' }).toUpperCase();
+      return `<tr><td>${dateLabel}</td><td>${Number(run.round)}</td><td>${Number(run.kills)}</td><td>${Number(run.accuracy).toFixed(1)}%</td></tr>`;
+    }).join('');
+    content.innerHTML = `
+      <p class="eyebrow">Recovered field reports</p><h2>Records</h2>
+      <div class="records-summary"><div class="record-number">${records.bestRound}</div><p>Best round survived</p></div>
+      <div class="records-ledger">
+        <h3>Recent operations</h3>
+        ${rows === '' ? '<p class="records-empty">No completed operation reports recovered.</p>' : `
+          <table><thead><tr><th>Date</th><th>Round</th><th>Kills</th><th>Accuracy</th></tr></thead><tbody>${rows}</tbody></table>
+        `}
+      </div>
+    `;
+  }
+
+  private showGameOver(readout: SceneSimulationReadout): void {
+    this.gameOverShown = true;
+    const accuracy = readout.stats.shots === 0 ? 0 : readout.stats.hits / readout.stats.shots * 100;
+    const bestRound = Math.max(this.loadBestRound(), readout.round);
+    const report = {
+      round: readout.round,
+      kills: readout.stats.kills,
+      headshots: readout.stats.headshots,
+      accuracy,
+      pointsEarned: readout.stats.pointsEarned,
+      doorsOpened: readout.stats.doorsOpened,
+      crateRolls: readout.stats.crateRolls,
+      recordedAt: new Date().toISOString(),
+    };
+    try {
+      const priorRaw = localStorage.getItem(CONFIG.storage.recordsKey);
+      const prior = priorRaw === null ? {} : JSON.parse(priorRaw) as { runs?: unknown[] };
+      const runs = Array.isArray(prior.runs) ? prior.runs.slice(-9) : [];
+      runs.push(report);
+      localStorage.setItem(CONFIG.storage.recordsKey, JSON.stringify({ bestRound, latest: report, runs }));
+    } catch {
+      // The report still renders when private browsing prevents persistence.
+    }
+    this.gameOverPanel.innerHTML = `
+      <p class="eyebrow">Operation terminated</p>
+      <h2>Rounds Survived</h2>
+      <strong class="survived-round">${readout.round}</strong>
+      <div class="after-action-grid">
+        <div><span>Kills</span><b>${readout.stats.kills}</b></div>
+        <div><span>Headshots</span><b>${readout.stats.headshots}</b></div>
+        <div><span>Accuracy</span><b>${accuracy.toFixed(1)}%</b></div>
+        <div><span>Points earned</span><b>${readout.stats.pointsEarned.toLocaleString()}</b></div>
+        <div><span>Doors opened</span><b>${readout.stats.doorsOpened}</b></div>
+        <div><span>Crate rolls</span><b>${readout.stats.crateRolls}</b></div>
+      </div>
+      <p class="best-round">Best round <b>${bestRound}</b></p>
+      <button type="button" class="restart-run"><kbd>R</kbd> Restart operation</button>
+    `;
+    this.gameOverPanel.querySelector<HTMLButtonElement>('.restart-run')?.addEventListener('click', () => this.handlers.onRestart());
+    this.gameOverPanel.classList.remove('is-hidden');
+  }
+
+  private loadSettings(): { fov: number; sensitivity: number; volume: number } {
+    try {
+      const raw = localStorage.getItem(CONFIG.storage.settingsKey);
+      const value = raw === null ? {} : JSON.parse(raw) as { fov?: number; sensitivity?: number; volume?: number };
+      return {
+        fov: Math.max(65, Math.min(90, Number(value.fov ?? CONFIG.player.fovDeg))),
+        sensitivity: Math.max(0.5, Math.min(2, Number(value.sensitivity ?? 1))),
+        volume: Math.max(0, Math.min(1, Number(value.volume ?? CONFIG.audio.masterGain))),
+      };
+    } catch {
+      return { fov: CONFIG.player.fovDeg, sensitivity: 1, volume: CONFIG.audio.masterGain };
+    }
+  }
+
+  private persistSetting(setting: 'fov' | 'sensitivity' | 'volume', value: number): void {
+    try {
+      const settings = this.loadSettings();
+      settings[setting] = value;
+      localStorage.setItem(CONFIG.storage.settingsKey, JSON.stringify(settings));
+    } catch {
+      // Live settings remain active if persistence is unavailable.
     }
   }
 }

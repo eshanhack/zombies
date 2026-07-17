@@ -63,6 +63,7 @@ export class FirstPersonController {
   private sequence = 0;
   private fixedTick = 0;
   private movementEnabled = true;
+  private sensitivityMultiplier = 1;
   private disposed = false;
 
   constructor(options: ControllerOptions) {
@@ -123,6 +124,10 @@ export class FirstPersonController {
     this.sprinting = false;
     this.state.vx = 0;
     this.state.vz = 0;
+  }
+
+  setSensitivityMultiplier(multiplier: number): void {
+    this.sensitivityMultiplier = THREE.MathUtils.clamp(multiplier, 0.5, 2);
   }
 
   reconcile(authoritative: AuthoritativePlayerState): void {
@@ -251,9 +256,9 @@ export class FirstPersonController {
 
   private readonly onMouseMove = (event: MouseEvent): void => {
     if (document.pointerLockElement !== this.canvas) return;
-    this.yaw -= event.movementX * CONFIG.controller.mouseSensitivity;
+    this.yaw -= event.movementX * CONFIG.controller.mouseSensitivity * this.sensitivityMultiplier;
     this.pitch = THREE.MathUtils.clamp(
-      this.pitch - event.movementY * CONFIG.controller.mouseSensitivity,
+      this.pitch - event.movementY * CONFIG.controller.mouseSensitivity * this.sensitivityMultiplier,
       -CONFIG.controller.pitchLimitRad,
       CONFIG.controller.pitchLimitRad,
     );

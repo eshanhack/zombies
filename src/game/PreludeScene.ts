@@ -1,4 +1,5 @@
 import * as THREE from 'three';
+import { RoundedBoxGeometry } from 'three/addons/geometries/RoundedBoxGeometry.js';
 import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../config.js';
 import { AudioSystem, type AudioDiagnostics, type AudioEnemyEmitter, type AudioPoint } from '../audio/AudioSystem.js';
 import { CRATE_LOCATIONS, DOORS, FOG_BANKS, FORGE, PERK_MACHINES, POWER_SWITCH, START_POSITIONS, WALL_BUYS, WINDOWS, roomAt } from '../map/blueprint.js';
@@ -9,11 +10,15 @@ import { activeWeapon, type CombatPlayerState, type FireResult, type RuntimeWeap
 import { BunkerMap } from './BunkerMap.js';
 import { EnemyRenderer, type EnemyVisualState } from './EnemyRenderer.js';
 import { FirstPersonController, type AuthoritativePlayerState, type ControllerReadout } from './FirstPersonController.js';
+import { ProductionPost } from './ProductionPost.js';
+import { RemoteOperative } from './RemoteOperative.js';
+import { applyTiledUvs, MaterialLibrary } from './MaterialLibrary.js';
 import type { ClientAction, NetworkFeedback, NetworkGameView } from '../network/CoopClient.js';
 
 export interface SceneMetrics {
   fps: number;
   drawCalls: number;
+  triangles: number;
 }
 
 export interface RemotePlayerPose {
@@ -22,6 +27,9 @@ export interface RemotePlayerPose {
   y: number;
   z: number;
   yaw: number;
+  pitch: number;
+  vx: number;
+  vz: number;
   connected: boolean;
   downed: boolean;
   spectating: boolean;
@@ -58,7 +66,7 @@ export interface SceneSimulationReadout {
   activeWeaponIndex: number;
   reloading: boolean;
   reloadRemainingMs: number;
-  stats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number };
+  stats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number; doorsOpened: number; crateRolls: number };
   grenades: number;
   perks: readonly PerkId[];
   pendingPerk: PerkId | '';
@@ -103,8 +111,11 @@ type HudEventInput =
 
 interface RemoteVisual {
   group: THREE.Group;
+  rig: RemoteOperative;
   targetPosition: THREE.Vector3;
   targetYaw: number;
+  targetPitch: number;
+  targetSpeedMps: number;
   targetDowned: boolean;
 }
 
@@ -121,6 +132,13 @@ export class PreludeScene {
   private readonly renderer: THREE.WebGLRenderer;
   private readonly scene = new THREE.Scene();
   private readonly camera: THREE.PerspectiveCamera;
+  private readonly post: ProductionPost;
+  private readonly viewmodelFill = new THREE.PointLight(
+    CONFIG.rendering.viewmodel.fillColor,
+    CONFIG.rendering.viewmodel.fillIntensity,
+    CONFIG.rendering.viewmodel.fillDistanceM,
+    2,
+  );
   private readonly timer = new THREE.Timer();
   private readonly menuRoot = new THREE.Group();
   private readonly remoteRoot = new THREE.Group();
@@ -129,8 +147,10 @@ export class PreludeScene {
   private cosmeticRng: SeededRng;
   private fogParticles: THREE.Points | null = null;
   private lamp: THREE.PointLight | null = null;
+  private menuMaterials: MaterialLibrary | null = null;
   private bunkerMap: BunkerMap | null = null;
   private enemyRenderer: EnemyRenderer | null = null;
+  private galleryInspectionLight: THREE.PointLight | null = null;
   private controller: FirstPersonController | null = null;
   private simulation: GameSimulation | null = null;
   private soloPlayer: SimPlayer | null = null;
@@ -150,6 +170,8 @@ export class PreludeScene {
   private gameplayElapsed = 0;
   private meleeAnimationRemainingMs = 0;
   private reloadAnimationRemainingMs = 0;
+  private shotAnimationRemainingMs = 0;
+  private drawAnimationRemainingMs = 0;
   private viewmodelRecoilM = 0;
   private muzzleRemainingMs = 0;
   private nextCosmeticFireAtMs = 0;
@@ -160,9 +182,13 @@ export class PreludeScene {
   private debugPerkIndex = 0;
   private debugPowerupIndex = 0;
   private debugWonderIndex = 0;
+  private debugTourIndex = 0;
   private readonly hudEvents: HudEvent[] = [];
   private godMode = false;
-  private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0 };
+  private visualGate = false;
+  private fieldOfView: number = CONFIG.player.fovDeg;
+  private sensitivityMultiplier: number = 1;
+  private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0, triangles: 0 };
 
   constructor(seed: number) {
     this.cosmeticRng = new SeededRng(seed ^ 0x5f356495);
@@ -177,7 +203,8 @@ export class PreludeScene {
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
     this.renderer.outputColorSpace = THREE.SRGBColorSpace;
     this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
-    this.renderer.toneMappingExposure = 0.82;
+    this.renderer.toneMappingExposure = CONFIG.rendering.toneMappingExposure;
+    this.renderer.info.autoReset = false;
     this.renderer.shadowMap.enabled = true;
     this.renderer.shadowMap.type = THREE.PCFShadowMap;
 
@@ -187,6 +214,9 @@ export class PreludeScene {
       CONFIG.rendering.cameraNearM,
       CONFIG.rendering.cameraFarM,
     );
+    this.viewmodelFill.position.set(0.2, -0.05, -0.45);
+    this.camera.add(this.viewmodelFill);
+    this.post = new ProductionPost(this.renderer, this.scene, this.camera);
     this.scene.background = new THREE.Color(CONFIG.rendering.clearColor);
     this.scene.fog = new THREE.FogExp2(CONFIG.rendering.fogColor, 0.047);
     this.buildMenu(seed);
@@ -205,7 +235,10 @@ export class PreludeScene {
     this.mode = 'gameplay';
     this.gameMode = options.mode;
     this.disposeObject(this.menuRoot);
+    this.menuMaterials?.dispose();
+    this.menuMaterials = null;
     this.scene.clear();
+    this.galleryInspectionLight = null;
     this.fogParticles = null;
     this.lamp = null;
     this.bunkerMap = new BunkerMap();
@@ -216,7 +249,7 @@ export class PreludeScene {
     this.scene.add(this.camera);
     this.scene.background = new THREE.Color(0x080b0b);
     this.scene.fog = new THREE.Fog(CONFIG.rendering.fogColor, CONFIG.rendering.fogNearM, CONFIG.rendering.fogFarM);
-    this.camera.fov = CONFIG.player.fovDeg;
+    this.camera.fov = this.fieldOfView;
     this.camera.near = CONFIG.rendering.cameraNearM;
     this.camera.far = CONFIG.rendering.cameraFarM;
     this.camera.updateProjectionMatrix();
@@ -260,10 +293,12 @@ export class PreludeScene {
       onReload: this.handleReload,
       onSwitchWeapon: this.handleSwitchWeapon,
     });
+    this.controller.setSensitivityMultiplier(this.sensitivityMultiplier);
     this.viewmodel = this.buildViewmodel('melder', false);
     this.viewmodelWeaponId = 'melder';
     this.viewmodelUpgraded = false;
     this.camera.add(this.viewmodel);
+    this.drawAnimationRemainingMs = CONFIG.controller.weaponSwitchMs;
     this.gameplayElapsed = 0;
     this.fixedAccumulator = 0;
     this.controller.requestLock();
@@ -304,18 +339,22 @@ export class PreludeScene {
       }
       visual.targetPosition.set(pose.x, pose.y, pose.z);
       visual.targetYaw = pose.yaw;
+      visual.targetPitch = pose.pitch;
+      visual.targetSpeedMps = Math.hypot(pose.vx, pose.vz);
       visual.targetDowned = pose.downed;
       visual.group.visible = !pose.spectating;
     }
     for (const [id, visual] of this.remotePlayers) {
       if (activeIds.has(id)) continue;
       this.remoteRoot.remove(visual.group);
-      this.disposeObject(visual.group);
+      visual.rig.dispose();
       this.remotePlayers.delete(id);
     }
   }
 
   command(name: string): boolean {
+    if (name !== 'gallery' && this.galleryInspectionLight !== null) this.galleryInspectionLight.visible = false;
+    if (name !== 'gallery' && this.viewmodel !== null) this.viewmodel.visible = true;
     if (name === 'audio') return this.audio.runLocalizationGate();
     if (name === 'noclip') return this.controller?.toggleNoclip() ?? false;
     if (name === 'nav') return this.bunkerMap?.toggleNavDebug() ?? false;
@@ -349,6 +388,11 @@ export class PreludeScene {
       return true;
     }
     if (name === 'arsenal') {
+      this.visualGate = true;
+      this.godMode = true;
+      this.simulation.enemies.clear();
+      this.soloPlayer.hp = this.soloPlayer.maxHp;
+      this.soloPlayer.invulnerableUntilMs = Number.POSITIVE_INFINITY;
       const weapons = ['melder', 'jaeger', 'kurier', 'sturmvogel', 'doppelhieb', 'lasttraeger', 'richter', 'grabenfeger', 'fernblick', 'kettenhund'] as const;
       this.debugWeaponIndex = (this.debugWeaponIndex + 1) % weapons.length;
       const weaponId = weapons[this.debugWeaponIndex] ?? 'melder';
@@ -398,6 +442,11 @@ export class PreludeScene {
       return true;
     }
     if (name === 'wonder') {
+      this.visualGate = true;
+      this.godMode = true;
+      this.simulation.enemies.clear();
+      this.soloPlayer.hp = this.soloPlayer.maxHp;
+      this.soloPlayer.invulnerableUntilMs = Number.POSITIVE_INFINITY;
       const wonders = ['blitzwerfer', 'sonnenpistole'] as const;
       const weaponId = wonders[this.debugWonderIndex % wonders.length] ?? 'blitzwerfer';
       this.debugWonderIndex += 1;
@@ -465,6 +514,117 @@ export class PreludeScene {
       if (viewingPose !== undefined) this.syncSoloPose(viewingPose);
       this.processSoloEvents(this.simulation.drainEvents());
       return this.simulation.forge.phase === 'upgrading';
+    }
+    if (name === 'gallery') {
+      this.visualGate = true;
+      this.godMode = true;
+      this.soloPlayer.hp = this.soloPlayer.maxHp;
+      this.soloPlayer.invulnerableUntilMs = Number.POSITIVE_INFINITY;
+      this.simulation.enemies.clear();
+      this.simulation.debugStartRound(4, [this.soloPlayer]);
+      this.simulation.setPowerOn(true);
+      this.bunkerMap?.updatePower(true, CONFIG.power.activationMs);
+      if (this.galleryInspectionLight === null) {
+        const visual = CONFIG.rendering.characterVisual;
+        this.galleryInspectionLight = new THREE.PointLight(
+          visual.galleryLightColor,
+          visual.galleryLightIntensity,
+          visual.galleryLightDistanceM,
+          2,
+        );
+        this.galleryInspectionLight.position.fromArray(visual.galleryLightPosition);
+        this.scene.add(this.galleryInspectionLight);
+      }
+      this.galleryInspectionLight.visible = true;
+      if (this.viewmodel !== null) this.viewmodel.visible = false;
+      const poses = [
+        { x: -2.25, z: -4.7, kind: 'zombie' as const },
+        { x: -0.85, z: -4.45, kind: 'zombie' as const },
+        { x: 0.65, z: -4.5, kind: 'zombie' as const },
+        { x: 2.15, z: -4.75, kind: 'crawler' as const },
+        { x: 3.35, z: -4.42, kind: 'wolf' as const },
+      ];
+      for (const pose of poses) {
+        const enemy = this.simulation.forceSpawn([this.soloPlayer]);
+        if (enemy === null) continue;
+        enemy.kind = pose.kind;
+        enemy.x = pose.x;
+        enemy.y = 0;
+        enemy.z = pose.z;
+        enemy.yaw = Math.PI;
+        enemy.state = 'chase';
+        enemy.stateTimeMs = enemy.id * 170;
+        enemy.spawnProgress = 1;
+        enemy.speed = 0;
+      }
+      this.controller?.debugSetPose(0, 0, -0.35, 0, -0.04);
+      return true;
+    }
+    if (name === 'stress') {
+      this.visualGate = true;
+      this.godMode = true;
+      this.soloPlayer.invulnerableUntilMs = Number.POSITIVE_INFINITY;
+      this.simulation.enemies.clear();
+      this.simulation.debugStartRound(CONFIG.debug.wonderGateRound, [this.soloPlayer]);
+      while (this.simulation.enemies.size < CONFIG.zombie.maxAlive) {
+        const enemy = this.simulation.forceSpawn([this.soloPlayer]);
+        if (enemy === null) break;
+        const index = this.simulation.enemies.size - 1;
+        const angle = index / CONFIG.zombie.maxAlive * Math.PI * 2;
+        const ring = 3.2 + (index % 3) * 0.72;
+        enemy.x = Math.sin(angle) * ring;
+        enemy.y = 0;
+        enemy.z = -1.5 - Math.cos(angle) * ring;
+        enemy.yaw = angle + Math.PI;
+        enemy.state = 'chase';
+        enemy.stateTimeMs = index * 83;
+        enemy.spawnProgress = 1;
+        enemy.speed = 0;
+      }
+      this.controller?.debugSetPose(
+        CONFIG.map.startPosition.x,
+        CONFIG.map.startPosition.y,
+        CONFIG.map.startPosition.z,
+        0,
+        0,
+      );
+      return this.simulation.enemies.size === CONFIG.zombie.maxAlive;
+    }
+    if (name === 'tour') {
+      this.visualGate = true;
+      this.godMode = true;
+      this.simulation.enemies.clear();
+      this.soloPlayer.hp = this.soloPlayer.maxHp;
+      this.soloPlayer.invulnerableUntilMs = Number.POSITIVE_INFINITY;
+      const poses = [
+        { x: 0, y: 0, z: -2.55, yaw: Math.PI, pitch: -0.04 },
+        { x: -7.2, y: 0, z: 12.2, yaw: 1.85, pitch: -0.045 },
+        { x: 10.3, y: 0, z: 9.55, yaw: 2.22, pitch: -0.055 },
+        { x: 3, y: CONFIG.map.catwalkY, z: 11, yaw: -1.24, pitch: -0.045 },
+      ];
+      const pose = poses[this.debugTourIndex % poses.length]!;
+      this.debugTourIndex += 1;
+      for (const door of DOORS) {
+        this.simulation.setDoorOpen(door.id, true);
+        this.bunkerMap?.setDoorOpen(door.id, true);
+      }
+      this.simulation.setPowerOn(true);
+      this.bunkerMap?.updatePower(true, CONFIG.power.activationMs);
+      this.controller?.debugSetPose(pose.x, pose.y, pose.z, pose.yaw, pose.pitch);
+      return true;
+    }
+    if (name === 'gameover') {
+      const combat = this.simulation.getCombatState(this.soloPlayer.id);
+      combat.kills = Math.max(combat.kills, 73);
+      combat.headshots = Math.max(combat.headshots, 29);
+      combat.shots = Math.max(combat.shots, 268);
+      combat.hits = Math.max(combat.hits, 177);
+      combat.pointsEarned = Math.max(combat.pointsEarned, 18470);
+      combat.doorsOpened = Math.max(combat.doorsOpened, 3);
+      combat.crateRolls = Math.max(combat.crateRolls, 7);
+      this.simulation.gameOver = true;
+      this.soloPlayer.downed = true;
+      return true;
     }
     return false;
   }
@@ -670,15 +830,58 @@ export class PreludeScene {
     return this.mode === 'gameplay';
   }
 
+  isDebugVisualGate(): boolean {
+    return this.visualGate;
+  }
+
+  restartSolo(seed: number): void {
+    this.controller?.dispose();
+    this.controller = null;
+    this.enemyRenderer?.dispose();
+    this.enemyRenderer = null;
+    this.bunkerMap?.dispose();
+    this.menuMaterials?.dispose();
+    this.bunkerMap = null;
+    for (const visual of this.remotePlayers.values()) visual.rig.dispose();
+    this.remotePlayers.clear();
+    this.remoteRoot.clear();
+    if (this.viewmodel !== null) {
+      this.camera.remove(this.viewmodel);
+      this.disposeObject(this.viewmodel);
+      this.viewmodel = null;
+    }
+    for (const effect of this.wonderEffects.splice(0)) {
+      this.scene.remove(effect.group);
+      this.disposeObject(effect.group);
+    }
+    this.scene.clear();
+    this.galleryInspectionLight = null;
+    this.simulation = null;
+    this.soloPlayer = null;
+    this.networkSimulation = null;
+    this.mode = 'menu';
+    this.godMode = false;
+    this.visualGate = false;
+    this.debugTourIndex = 0;
+    this.fireHeld = false;
+    this.grenadeCookStartedAtMs = -1;
+    this.hudEvents.length = 0;
+    this.enterGameplay({ mode: 'solo', seed });
+  }
+
   stop(): void {
     cancelAnimationFrame(this.frameHandle);
     this.frameHandle = 0;
     window.removeEventListener('resize', this.onResize);
     this.controller?.dispose();
+    for (const visual of this.remotePlayers.values()) visual.rig.dispose();
+    this.remotePlayers.clear();
     this.enemyRenderer?.dispose();
     this.bunkerMap?.dispose();
+    this.menuMaterials?.dispose();
     this.audio.dispose();
     this.timer.dispose();
+    this.post.dispose();
     this.renderer.dispose();
   }
 
@@ -690,28 +893,44 @@ export class PreludeScene {
     return this.audio.getDiagnostics();
   }
 
+  getCharacterDiagnostics(): ReturnType<EnemyRenderer['getDiagnostics']> | null {
+    return this.enemyRenderer?.getDiagnostics() ?? null;
+  }
+
   setMasterVolume(value: number): void {
     this.audio.setMasterVolume(value);
+  }
+
+  setFieldOfView(value: number): void {
+    this.fieldOfView = THREE.MathUtils.clamp(value, 65, 90);
+    this.camera.fov = this.fieldOfView;
+    this.camera.updateProjectionMatrix();
+  }
+
+  setSensitivityMultiplier(value: number): void {
+    this.sensitivityMultiplier = THREE.MathUtils.clamp(value, 0.5, 2);
+    this.controller?.setSensitivityMultiplier(this.sensitivityMultiplier);
   }
 
   private buildMenu(seed: number): void {
     this.menuRoot.name = 'menu-prelude';
     const rng = new SeededRng(seed);
-    const concrete = new THREE.MeshStandardMaterial({ color: 0x292d2c, roughness: 0.93, metalness: 0.03 });
-    const concreteDark = new THREE.MeshStandardMaterial({ color: 0x151918, roughness: 0.98 });
-    const steel = new THREE.MeshStandardMaterial({ color: 0x262b29, roughness: 0.57, metalness: 0.72 });
-    const wood = new THREE.MeshStandardMaterial({ color: 0x493827, roughness: 0.86 });
+    this.menuMaterials = new MaterialLibrary();
+    const concrete = this.menuMaterials.clone('plaster', { color: 0xbcb7a7, roughness: 0.94 });
+    const concreteDark = this.menuMaterials.clone('concrete', { color: 0x5c625e, roughness: 0.98 });
+    const steel = this.menuMaterials.clone('steel', { color: 0x737d79, roughness: 0.57, metalness: 0.72 });
+    const wood = this.menuMaterials.clone('wood', { color: 0x9a7651, roughness: 0.88 });
 
-    const floor = new THREE.Mesh(new THREE.PlaneGeometry(30, 32), concreteDark);
+    const floor = new THREE.Mesh(applyTiledUvs(new THREE.PlaneGeometry(30, 32)), concreteDark);
     floor.rotation.x = -Math.PI / 2;
     floor.receiveShadow = true;
     this.menuRoot.add(floor);
-    const rear = new THREE.Mesh(new THREE.BoxGeometry(16, 5.5, 0.6), concrete);
+    const rear = new THREE.Mesh(applyTiledUvs(new THREE.BoxGeometry(16, 5.5, 0.6)), concrete);
     rear.position.set(0, 2.7, -3.8);
     rear.castShadow = true;
     rear.receiveShadow = true;
     this.menuRoot.add(rear);
-    const sideLeft = new THREE.Mesh(new THREE.BoxGeometry(0.6, 5.5, 15), concrete);
+    const sideLeft = new THREE.Mesh(applyTiledUvs(new THREE.BoxGeometry(0.6, 5.5, 15)), concrete);
     sideLeft.position.set(-7.7, 2.7, 2.8);
     sideLeft.castShadow = true;
     sideLeft.receiveShadow = true;
@@ -719,10 +938,10 @@ export class PreludeScene {
     const sideRight = sideLeft.clone();
     sideRight.position.x = 7.7;
     this.menuRoot.add(sideRight);
-    const ceiling = new THREE.Mesh(new THREE.BoxGeometry(16, 0.45, 15), concreteDark);
+    const ceiling = new THREE.Mesh(applyTiledUvs(new THREE.BoxGeometry(16, 0.45, 15)), concreteDark);
     ceiling.position.set(0, 5.45, 2.8);
     this.menuRoot.add(ceiling);
-    const doorway = new THREE.Mesh(new THREE.BoxGeometry(3.8, 3.8, 0.85), steel);
+    const doorway = new THREE.Mesh(applyTiledUvs(new THREE.BoxGeometry(3.8, 3.8, 0.85)), steel);
     doorway.position.set(0, 1.9, -3.35);
     this.menuRoot.add(doorway);
     const voidPanel = new THREE.Mesh(new THREE.PlaneGeometry(2.8, 3.1), new THREE.MeshBasicMaterial({ color: 0x020303 }));
@@ -743,19 +962,35 @@ export class PreludeScene {
       chunk.castShadow = true;
       this.menuRoot.add(chunk);
     }
-    const moon = new THREE.DirectionalLight(0x88a8ba, 1.8);
+    for (const x of [-6.6, -3.3, 0, 3.3, 6.6]) {
+      const rib = new THREE.Mesh(applyTiledUvs(new THREE.BoxGeometry(0.18, 0.22, 14.2)), steel);
+      rib.position.set(x, 5.08, 2.8);
+      rib.castShadow = true;
+      this.menuRoot.add(rib);
+    }
+    for (const y of [3.7, 4.05]) {
+      const pipe = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 13.8, 10), steel);
+      pipe.rotation.x = Math.PI / 2;
+      pipe.position.set(-6.95, y, 2.8);
+      this.menuRoot.add(pipe);
+    }
+    const moon = new THREE.DirectionalLight(0x88a8ba, CONFIG.rendering.environment.menuMoonIntensity);
     moon.position.set(-8, 11, 7);
     moon.castShadow = true;
     moon.shadow.mapSize.set(CONFIG.rendering.shadowMapSize, CONFIG.rendering.shadowMapSize);
     this.menuRoot.add(moon);
-    this.lamp = new THREE.PointLight(0xffb45d, 17, 11, 2);
+    this.lamp = new THREE.PointLight(0xffb45d, CONFIG.rendering.environment.menuLampIntensity, 11, 2);
     this.lamp.position.set(1.5, 4.4, 0.5);
     this.lamp.castShadow = true;
     this.menuRoot.add(this.lamp);
     const bulb = new THREE.Mesh(new THREE.SphereGeometry(0.09, 12, 8), new THREE.MeshBasicMaterial({ color: 0xffd39a }));
     bulb.position.copy(this.lamp.position);
     this.menuRoot.add(bulb);
-    this.menuRoot.add(new THREE.HemisphereLight(0x344b57, 0x090a08, 0.55));
+    this.menuRoot.add(new THREE.HemisphereLight(
+      0x344b57,
+      0x090a08,
+      CONFIG.rendering.environment.menuHemisphereIntensity,
+    ));
     this.fogParticles = this.buildFog(seed);
     this.menuRoot.add(this.fogParticles);
     this.camera.position.set(0, 2.15, 9.5);
@@ -786,11 +1021,14 @@ export class PreludeScene {
   private buildViewmodel(weaponId: WeaponId, upgraded: boolean): THREE.Group {
     const group = new THREE.Group();
     group.name = `${weaponId}-viewmodel`;
-    const metal = new THREE.MeshStandardMaterial({ color: 0x242827, roughness: 0.46, metalness: 0.74 });
-    const darkMetal = new THREE.MeshStandardMaterial({ color: 0x111413, roughness: 0.58, metalness: 0.66 });
-    const grip = new THREE.MeshStandardMaterial({ color: 0x4a3728, roughness: 0.82 });
+    const compactWeapon = weaponId === 'melder' || weaponId === 'richter' || weaponId === 'sonnenpistole';
+    const viewmodelVisual = CONFIG.rendering.viewmodel;
+    const metal = new THREE.MeshStandardMaterial({ color: viewmodelVisual.metalColor, emissive: 0x090b0a, emissiveIntensity: 0.055, roughness: 0.3, metalness: 0.88 });
+    const darkMetal = new THREE.MeshStandardMaterial({ color: viewmodelVisual.darkMetalColor, emissive: 0x050706, emissiveIntensity: 0.045, roughness: 0.48, metalness: 0.8 });
+    const grip = new THREE.MeshStandardMaterial({ color: viewmodelVisual.walnutColor, roughness: 0.82, metalness: 0.02 });
     const addBox = (size: [number, number, number], position: [number, number, number], material: THREE.Material = metal): THREE.Mesh => {
-      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
+      const bevel = Math.min(0.024, Math.min(...size) * 0.14);
+      const mesh = new THREE.Mesh(new RoundedBoxGeometry(size[0], size[1], size[2], 2, bevel), material);
       mesh.position.set(...position);
       group.add(mesh);
       return mesh;
@@ -807,73 +1045,137 @@ export class PreludeScene {
       addBox([0.018, 0.08, 0.018], [-0.065, position[1] - 0.045, position[2] + 0.07], metal);
       addBox([0.018, 0.08, 0.018], [0.065, position[1] - 0.045, position[2] + 0.07], metal);
     };
+    const addBand = (radius: number, z: number, material: THREE.Material = metal): void => {
+      const band = new THREE.Mesh(new THREE.TorusGeometry(radius, 0.009, 6, 16), material);
+      band.position.set(0, 0.04, z);
+      group.add(band);
+    };
+    const addWoodStock = (stockLength: number): void => {
+      const rearLength = stockLength * 0.46;
+      const wristLength = stockLength * 0.38;
+      const rear = addBox([0.19, 0.205, rearLength], [0, -0.075, 0.08 + stockLength * 0.27], grip);
+      rear.rotation.x = -0.055;
+      const wrist = addBox([0.115, 0.145, wristLength], [0, -0.035, 0.08 - stockLength * 0.18], grip);
+      wrist.rotation.x = -0.055;
+      addBox([0.198, 0.215, 0.035], [0, -0.088, 0.08 + stockLength * 0.51], darkMetal).rotation.x = -0.055;
+      for (const side of [-1, 1]) {
+        addBox([0.008, 0.012, rearLength * 0.72], [side * 0.098, -0.025, 0.08 + stockLength * 0.27], darkMetal);
+      }
+    };
     const addLongGun = (barrelLength: number, stockLength: number, magazine: 'box' | 'drum' | 'none' = 'box'): void => {
-      addBox([0.18, 0.16, stockLength], [0, -0.06, 0.08], grip).rotation.x = -0.04;
-      addBox([0.16, 0.15, 0.38], [0, 0.025, -0.34]);
+      addWoodStock(stockLength);
+      addBox([0.16, 0.15, 0.38], [0, 0.025, -0.34], metal);
+      const cover = addBox([0.135, 0.072, 0.32], [0, 0.105, -0.35], darkMetal);
+      cover.name = 'vm-cover';
+      addBox([0.142, 0.105, Math.min(0.32, barrelLength * 0.46)], [0, 0.015, -0.62], grip);
       addBarrel(0.026, barrelLength, [0, 0.04, -0.55 - barrelLength * 0.5]);
-      if (magazine === 'box') addBox([0.13, 0.25, 0.15], [0, -0.17, -0.31], darkMetal).rotation.x = 0.12;
+      if (magazine === 'box') {
+        const boxMagazine = addBox([0.13, 0.25, 0.15], [0, -0.17, -0.31], darkMetal);
+        boxMagazine.rotation.x = 0.12;
+        boxMagazine.name = 'vm-magazine';
+      }
       if (magazine === 'drum') {
         const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.1, 16), darkMetal);
+        drum.name = 'vm-magazine';
         drum.rotation.z = Math.PI / 2;
         drum.position.set(0, -0.1, -0.3);
         group.add(drum);
       }
+      addBand(0.06, -0.54);
+      addBand(0.053, -0.77);
+      const action = addBox([0.055, 0.035, 0.12], [0.1, 0.085, -0.34], darkMetal);
+      action.name = 'vm-bolt';
       addBox([0.018, 0.065, 0.025], [0, 0.12, -0.52 - barrelLength]);
+      addBox([0.075, 0.026, 0.02], [0, 0.145, -0.23], darkMetal);
     };
 
     if (weaponId === 'melder') {
-      addBox([0.11, 0.1, 0.47], [0, 0, -0.09]);
+      const slide = addBox([0.11, 0.1, 0.47], [0, 0, -0.09]);
+      slide.name = 'vm-bolt';
+      addBox([0.102, 0.075, 0.31], [0, -0.072, -0.005], darkMetal);
       addBarrel(0.03, 0.32, [0, 0.005, -0.34]);
       addBox([0.1, 0.24, 0.13], [0, -0.14, 0.08], grip).rotation.x = -0.2;
-      addBox([0.018, 0.035, 0.035], [0, 0.067, -0.25], darkMetal);
+      addBox([0.018, 0.035, 0.035], [0, 0.067, -0.28], darkMetal);
+      for (const x of [-0.035, 0.035]) addBox([0.014, 0.03, 0.025], [x, 0.065, 0.105], darkMetal);
+      for (const z of [0.045, 0.085, 0.125, 0.165]) {
+        for (const x of [-0.057, 0.057]) addBox([0.006, 0.075, 0.018], [x, 0.004, z], darkMetal);
+      }
+      for (const x of [-0.052, 0.052]) addBox([0.012, 0.15, 0.09], [x, -0.145, 0.08], darkMetal);
+      const muzzleRing = new THREE.Mesh(new THREE.TorusGeometry(0.028, 0.006, 7, 18), darkMetal);
+      muzzleRing.position.set(0, 0.005, -0.505);
+      group.add(muzzleRing);
     } else if (weaponId === 'jaeger') {
       addLongGun(0.72, 0.72, 'none');
       const bolt = addBarrel(0.018, 0.18, [0.14, 0.095, -0.29], metal);
+      bolt.name = 'vm-bolt';
       bolt.rotation.set(0, 0, Math.PI / 2);
       addBox([0.08, 0.055, 0.035], [0, 0.12, -0.25], darkMetal);
-      group.scale.setScalar(CONFIG.rendering.viewmodel.jagerScale);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.jaeger);
     } else if (weaponId === 'kurier') {
       addLongGun(0.54, 0.58, 'box');
       addBox([0.1, 0.06, 0.26], [0, 0.11, -0.18], grip);
-      group.scale.setScalar(1.05);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.kurier);
     } else if (weaponId === 'sturmvogel') {
       addBox([0.18, 0.18, 0.52], [0, 0, -0.23]);
       addBarrel(0.034, 0.38, [0, 0.02, -0.68]);
-      addBox([0.13, 0.34, 0.14], [0, -0.22, -0.24], darkMetal).rotation.x = -0.08;
+      const magazine = addBox([0.13, 0.34, 0.14], [0, -0.22, -0.24], darkMetal);
+      magazine.rotation.x = -0.08;
+      magazine.name = 'vm-magazine';
       addBox([0.12, 0.28, 0.12], [0, -0.17, 0.08], grip).rotation.x = -0.24;
+      const topAction = addBox([0.17, 0.055, 0.34], [0, 0.115, -0.26], darkMetal);
+      topAction.name = 'vm-bolt';
+      addBand(0.052, -0.52);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.sturmvogel);
     } else if (weaponId === 'doppelhieb') {
-      addBox([0.22, 0.18, 0.78], [0, -0.07, 0.02], grip);
-      addBarrel(0.037, 0.82, [-0.044, 0.055, -0.72]);
-      addBarrel(0.037, 0.82, [0.044, 0.055, -0.72]);
+      addWoodStock(0.72);
+      addBox([0.2, 0.135, 0.32], [0, -0.01, -0.42], grip);
+      const leftBarrel = addBarrel(0.037, 0.82, [-0.044, 0.055, -0.72]);
+      leftBarrel.name = 'vm-break-barrel';
+      const rightBarrel = addBarrel(0.037, 0.82, [0.044, 0.055, -0.72]);
+      rightBarrel.name = 'vm-break-barrel';
       addBox([0.17, 0.18, 0.2], [0, 0.015, -0.32], metal);
-      group.scale.setScalar(1.08);
+      for (const x of [-0.044, 0.044]) {
+        const muzzle = new THREE.Mesh(new THREE.TorusGeometry(0.037, 0.006, 6, 14), darkMetal);
+        muzzle.position.set(x, 0.055, -1.13);
+        group.add(muzzle);
+      }
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.doppelhieb);
     } else if (weaponId === 'lasttraeger') {
       addLongGun(0.64, 0.58, 'drum');
-      addBox([0.2, 0.08, 0.4], [0, 0.15, -0.31], darkMetal);
+      const lmgCover = addBox([0.2, 0.08, 0.4], [0, 0.15, -0.31], darkMetal);
+      lmgCover.name = 'vm-heavy-cover';
       addBarrel(0.012, 0.48, [-0.12, -0.11, -0.73], metal).rotation.z = -0.22;
       addBarrel(0.012, 0.48, [0.12, -0.11, -0.73], metal).rotation.z = 0.22;
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.lasttraeger);
     } else if (weaponId === 'richter') {
       addBox([0.13, 0.12, 0.31], [0, 0.01, -0.17]);
       addBarrel(0.037, 0.48, [0, 0.025, -0.54]);
       const cylinder = addBarrel(0.095, 0.15, [0, -0.005, -0.15], metal);
+      cylinder.name = 'vm-cylinder';
       cylinder.rotation.set(0, 0, Math.PI / 2);
       addBox([0.12, 0.3, 0.14], [0, -0.18, 0.04], grip).rotation.x = -0.24;
     } else if (weaponId === 'grabenfeger') {
-      addBox([0.19, 0.17, 0.7], [0, -0.07, 0.05], grip);
+      addWoodStock(0.66);
       addBarrel(0.038, 0.83, [0, 0.06, -0.76]);
       addBarrel(0.026, 0.7, [0, -0.025, -0.72], metal);
-      addBox([0.21, 0.18, 0.31], [0, -0.02, -0.63], grip);
+      const pump = addBox([0.21, 0.18, 0.31], [0, -0.02, -0.63], grip);
+      pump.name = 'vm-pump';
+      for (const x of [-0.075, -0.025, 0.025, 0.075]) addBox([0.012, 0.19, 0.24], [x, -0.02, -0.63], darkMetal);
+      addBand(0.059, -1.16);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.grabenfeger);
     } else if (weaponId === 'fernblick') {
       addLongGun(0.78, 0.7, 'none');
       addScope([0, 0.19, -0.46], 0.56);
-      group.scale.setScalar(1.12);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.fernblick);
     } else if (weaponId === 'kettenhund') {
       addLongGun(0.7, 0.52, 'box');
-      addBox([0.24, 0.24, 0.5], [0.25, -0.12, -0.28], darkMetal);
-      addBox([0.22, 0.1, 0.45], [0, 0.17, -0.31], metal);
+      const ammunitionBox = addBox([0.24, 0.24, 0.5], [0.25, -0.12, -0.28], darkMetal);
+      ammunitionBox.name = 'vm-magazine';
+      const heavyCover = addBox([0.22, 0.1, 0.45], [0, 0.17, -0.31], metal);
+      heavyCover.name = 'vm-heavy-cover';
       addBarrel(0.012, 0.52, [-0.13, -0.11, -0.8], metal).rotation.z = -0.2;
       addBarrel(0.012, 0.52, [0.13, -0.11, -0.8], metal).rotation.z = 0.2;
-      group.scale.setScalar(1.08);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.kettenhund);
     } else if (weaponId === 'blitzwerfer') {
       const ceramic = new THREE.MeshStandardMaterial({ color: 0x253f50, emissive: CONFIG.rendering.wonderEffect.blitzColor, emissiveIntensity: 0.32, roughness: 0.3, metalness: 0.38 });
       const conductor = new THREE.MeshStandardMaterial({ color: 0x8eb9c6, emissive: CONFIG.rendering.wonderEffect.blitzCoreColor, emissiveIntensity: 0.78, roughness: 0.2, metalness: 0.86 });
@@ -889,7 +1191,7 @@ export class PreludeScene {
         const tine = addBarrel(0.014, 0.22, [x, 0.035, -1.17], conductor);
         tine.rotation.z = x < 0 ? -0.12 : 0.12;
       }
-      group.scale.setScalar(0.82);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.blitzwerfer);
     } else if (weaponId === 'sonnenpistole') {
       const solar = new THREE.MeshStandardMaterial({ color: 0x51261b, emissive: CONFIG.rendering.wonderEffect.sunColor, emissiveIntensity: 0.34, roughness: 0.38, metalness: 0.62 });
       const brass = new THREE.MeshStandardMaterial({ color: 0x99703c, emissive: CONFIG.rendering.wonderEffect.sunCoreColor, emissiveIntensity: 0.42, roughness: 0.28, metalness: 0.82 });
@@ -908,7 +1210,23 @@ export class PreludeScene {
       const muzzle = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.016, 8, 20), brass);
       muzzle.position.set(0, 0.025, -0.88);
       group.add(muzzle);
-      group.scale.setScalar(0.88);
+      group.scale.setScalar(viewmodelVisual.scaleByWeapon.sonnenpistole);
+    }
+    const ejectionPort = compactWeapon
+      ? addBox([0.012, 0.032, 0.13], [0.057, 0.048, -0.12], darkMetal)
+      : addBox([0.075, 0.032, 0.16], [0.09, 0.075, -0.25], darkMetal);
+    ejectionPort.rotation.z = 0.04;
+    const triggerGuard = new THREE.Mesh(new THREE.TorusGeometry(0.052, 0.006, 6, 18, Math.PI * 1.45), darkMetal);
+    triggerGuard.rotation.z = Math.PI / 2;
+    triggerGuard.position.set(0, -0.105, -0.075);
+    group.add(triggerGuard);
+    const rivetX = compactWeapon ? 0.046 : 0.085;
+    for (const z of [-0.12, -0.31]) {
+      for (const x of [-rivetX, rivetX]) {
+        const rivet = new THREE.Mesh(new THREE.SphereGeometry(0.012, 7, 5), darkMetal);
+        rivet.position.set(x, 0.078, z);
+        group.add(rivet);
+      }
     }
     if (upgraded) {
       group.traverse((object) => {
@@ -933,20 +1251,46 @@ export class PreludeScene {
         group.add(rune);
       }
     }
-    const sleeve = new THREE.MeshStandardMaterial({ color: 0x343b36, roughness: 0.94 });
-    const leftArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.34, 4, 8), sleeve);
+    if (group.scale.x === 1) group.scale.setScalar(viewmodelVisual.scaleByWeapon[weaponId]);
+    const sleeve = new THREE.MeshStandardMaterial({ color: viewmodelVisual.sleeveColor, roughness: 0.94 });
+    const glove = new THREE.MeshStandardMaterial({ color: viewmodelVisual.gloveColor, roughness: 0.9 });
+    const leftArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.34, 8, 16), sleeve);
+    leftArm.name = 'vm-left-arm';
     leftArm.rotation.x = Math.PI / 2.7;
     leftArm.rotation.z = -0.28;
     leftArm.position.set(-0.16, -0.25, 0.13);
     group.add(leftArm);
     const rightArm = leftArm.clone();
+    rightArm.name = 'vm-right-arm';
     rightArm.position.x = 0.18;
     rightArm.rotation.z = 0.32;
     group.add(rightArm);
+    const leftHand = new THREE.Mesh(new THREE.CapsuleGeometry(0.052, 0.085, 7, 14), glove);
+    leftHand.name = 'vm-left-hand';
+    leftHand.scale.set(0.86, 1, 0.74);
+    leftHand.position.set(-0.105, -0.155, compactWeapon ? -0.08 : -0.38);
+    leftHand.rotation.z = compactWeapon ? -0.34 : Math.PI / 2;
+    group.add(leftHand);
+    const rightHand = leftHand.clone();
+    rightHand.name = 'vm-right-hand';
+    rightHand.position.set(0.105, -0.16, 0.035);
+    rightHand.rotation.z = 0.28;
+    group.add(rightHand);
+    for (let finger = 0; finger < 4; finger += 1) {
+      const segment = new THREE.Mesh(new THREE.CapsuleGeometry(0.011, 0.046, 3, 7), glove);
+      segment.position.set(0.062, -0.11 - finger * 0.028, 0.005 + finger * 0.01);
+      segment.rotation.z = 0.18;
+      segment.rotation.x = -0.18;
+      group.add(segment);
+    }
     group.traverse((object) => {
       if (object instanceof THREE.Mesh) {
         object.castShadow = false;
         object.renderOrder = 10;
+      }
+      if (object.name.startsWith('vm-')) {
+        object.userData.restPosition = object.position.clone();
+        object.userData.restRotation = object.rotation.clone();
       }
     });
     const hip = CONFIG.rendering.viewmodel.hip;
@@ -973,18 +1317,16 @@ export class PreludeScene {
   }
 
   private createRemoteVisual(): RemoteVisual {
-    const group = new THREE.Group();
-    const coat = new THREE.MeshStandardMaterial({ color: 0x3c4640, roughness: 0.9 });
-    const skin = new THREE.MeshStandardMaterial({ color: 0x766858, roughness: 0.86 });
-    const body = new THREE.Mesh(new THREE.CapsuleGeometry(0.31, 0.9, 4, 8), coat);
-    body.position.y = 0.82;
-    body.castShadow = true;
-    group.add(body);
-    const head = new THREE.Mesh(new THREE.SphereGeometry(0.19, 10, 8), skin);
-    head.position.y = 1.56;
-    head.castShadow = true;
-    group.add(head);
-    return { group, targetPosition: new THREE.Vector3(), targetYaw: 0, targetDowned: false };
+    const rig = new RemoteOperative();
+    return {
+      group: rig.group,
+      rig,
+      targetPosition: new THREE.Vector3(),
+      targetYaw: 0,
+      targetPitch: 0,
+      targetSpeedMps: 0,
+      targetDowned: false,
+    };
   }
 
   private updateGameplay(delta: number): void {
@@ -1002,8 +1344,10 @@ export class PreludeScene {
         this.soloPlayer.z = readout.z;
         this.soloPlayer.yaw = readout.yaw;
         this.soloPlayer.pitch = readout.pitch;
-        this.simulation.update(1000 / CONFIG.simulation.hz, [this.soloPlayer]);
-        this.processSoloEvents(this.simulation.drainEvents());
+        if (!this.visualGate) {
+          this.simulation.update(1000 / CONFIG.simulation.hz, [this.soloPlayer]);
+          this.processSoloEvents(this.simulation.drainEvents());
+        }
         if (this.godMode) {
           this.soloPlayer.hp = this.soloPlayer.maxHp;
           this.soloPlayer.downed = false;
@@ -1025,6 +1369,8 @@ export class PreludeScene {
     }
     this.meleeAnimationRemainingMs = Math.max(0, this.meleeAnimationRemainingMs - delta * 1000);
     this.reloadAnimationRemainingMs = Math.max(0, this.reloadAnimationRemainingMs - delta * 1000);
+    this.shotAnimationRemainingMs = Math.max(0, this.shotAnimationRemainingMs - delta * 1000);
+    this.drawAnimationRemainingMs = Math.max(0, this.drawAnimationRemainingMs - delta * 1000);
     this.muzzleRemainingMs = Math.max(0, this.muzzleRemainingMs - delta * 1000);
     this.viewmodelRecoilM = THREE.MathUtils.lerp(this.viewmodelRecoilM, 0, Math.min(1, delta * 1000 / CONFIG.controller.recoilRecoveryMs));
     if (this.muzzleLight !== null) this.muzzleLight.intensity = this.muzzleRemainingMs > 0 ? CONFIG.rendering.muzzleLightIntensity : 0;
@@ -1069,7 +1415,7 @@ export class PreludeScene {
     for (const visual of this.remotePlayers.values()) {
       visual.group.position.lerp(visual.targetPosition, interpolationAlpha);
       visual.group.rotation.y = lerpAngle(visual.group.rotation.y, visual.targetYaw, interpolationAlpha);
-      visual.group.rotation.z = THREE.MathUtils.lerp(visual.group.rotation.z, visual.targetDowned ? -1.2 : 0, interpolationAlpha);
+      visual.rig.update(delta, { speedMps: visual.targetSpeedMps, pitch: visual.targetPitch, downed: visual.targetDowned });
     }
   }
 
@@ -1112,11 +1458,72 @@ export class PreludeScene {
     const reloadArc = this.reloadAnimationRemainingMs > 0 ? Math.sin(reloadProgress * Math.PI) : 0;
     viewmodel.position.y -= reloadArc * CONFIG.rendering.viewmodel.reloadDropM;
     viewmodel.rotation.z += reloadArc * CONFIG.rendering.viewmodel.reloadRollRad;
+    const weaponId = weapon?.id ?? this.viewmodelWeaponId;
+    this.updateViewmodelParts(viewmodel, weaponId, reloadArc);
+    if (this.drawAnimationRemainingMs > 0) {
+      const drawProgress = 1 - this.drawAnimationRemainingMs / CONFIG.controller.weaponSwitchMs;
+      const drawOffset = 1 - THREE.MathUtils.smoothstep(drawProgress, 0, 1);
+      viewmodel.position.y -= drawOffset * CONFIG.rendering.viewmodel.animation.drawDropM;
+      viewmodel.rotation.z += drawOffset * CONFIG.rendering.viewmodel.animation.drawRollRad;
+    }
     const forgeActive = simulation?.forge.phase === 'upgrading' && simulation.forge.playerId === simulation.localPlayerId;
     const forgeProgress = forgeActive ? 1 - simulation.forge.remainingMs / CONFIG.forge.animationMs : 0;
     const forgeArc = forgeActive ? Math.sin(forgeProgress * Math.PI) : 0;
     viewmodel.position.y -= forgeArc * CONFIG.rendering.viewmodel.forgeDropM;
     viewmodel.rotation.x += forgeArc * CONFIG.rendering.viewmodel.forgePitchRad;
+  }
+
+  private updateViewmodelParts(viewmodel: THREE.Group, weaponId: WeaponId, reloadArc: number): void {
+    const visual = CONFIG.rendering.viewmodel.animation;
+    const actionDuration = visual.actionMs[weaponId];
+    const actionProgress = this.shotAnimationRemainingMs > 0
+      ? 1 - this.shotAnimationRemainingMs / actionDuration
+      : 1;
+    const actionArc = this.shotAnimationRemainingMs > 0 ? Math.sin(actionProgress * Math.PI) : 0;
+    const boltWeapons: readonly WeaponId[] = ['melder', 'jaeger', 'kurier', 'sturmvogel', 'fernblick', 'lasttraeger', 'kettenhund'];
+    const magazineReload = this.reloadAnimationRemainingMs > 0
+      && weaponId !== 'doppelhieb'
+      && weaponId !== 'grabenfeger'
+      && weaponId !== 'jaeger'
+      && weaponId !== 'fernblick'
+      && weaponId !== 'richter';
+
+    viewmodel.traverse((object) => {
+      const restPosition = object.userData.restPosition as THREE.Vector3 | undefined;
+      const restRotation = object.userData.restRotation as THREE.Euler | undefined;
+      if (restPosition !== undefined) object.position.copy(restPosition);
+      if (restRotation !== undefined) object.rotation.copy(restRotation);
+      if (object.name === 'vm-bolt' && boltWeapons.includes(weaponId)) {
+        const reloadBoltArc = (weaponId === 'jaeger' || weaponId === 'fernblick') ? reloadArc : 0;
+        object.position.z += visual.boltTravelM * Math.max(actionArc, reloadBoltArc);
+      }
+      if (object.name === 'vm-pump' && weaponId === 'grabenfeger') {
+        object.position.z += visual.pumpTravelM * actionArc;
+      }
+      if (object.name === 'vm-magazine' && magazineReload) {
+        object.position.y -= visual.magazineDropM * reloadArc;
+        object.rotation.z += visual.magazineRollRad * reloadArc;
+      }
+      if (object.name === 'vm-break-barrel' && weaponId === 'doppelhieb') {
+        object.rotation.x += visual.breakActionAngleRad * reloadArc;
+        object.position.y -= visual.boltTravelM * reloadArc;
+      }
+      if (object.name === 'vm-cylinder' && weaponId === 'richter') {
+        object.position.x -= visual.cylinderSwingM * reloadArc;
+        object.rotation.z += visual.magazineRollRad * reloadArc + actionArc * Math.PI / 3;
+      }
+      if (object.name === 'vm-heavy-cover' && (weaponId === 'lasttraeger' || weaponId === 'kettenhund')) {
+        object.rotation.x -= visual.coverOpenAngleRad * reloadArc;
+        object.position.y += visual.boltTravelM * reloadArc;
+      }
+      if (object.name === 'vm-left-hand') {
+        if (weaponId === 'grabenfeger') object.position.z += visual.pumpTravelM * actionArc;
+        if (this.reloadAnimationRemainingMs > 0) {
+          object.position.y -= visual.supportHandTravelM * reloadArc;
+          object.position.x -= visual.supportHandTravelM * 0.35 * reloadArc;
+        }
+      }
+    });
   }
 
   private refreshSimulationVisuals(): void {
@@ -1199,6 +1606,8 @@ export class PreludeScene {
     if (this.gameMode === 'coop') this.sendAction?.({ type: 'switch', index });
     else if (this.soloPlayer !== null && !this.simulation?.switchWeapon(this.soloPlayer.id, index)) return;
     this.reloadAnimationRemainingMs = 0;
+    this.shotAnimationRemainingMs = 0;
+    this.drawAnimationRemainingMs = CONFIG.controller.weaponSwitchMs;
     this.nextCosmeticFireAtMs = this.gameplayElapsed * 1000 + CONFIG.controller.weaponSwitchMs;
     this.ensureViewmodelWeapon(readout.weapons[index]!.id, readout.weapons[index]!.upgraded);
   };
@@ -1209,6 +1618,7 @@ export class PreludeScene {
     this.controller?.applyRecoil(definition.recoilVertical, horizontal);
     this.viewmodelRecoilM = CONFIG.rendering.viewmodel.recoilPositionM;
     this.muzzleRemainingMs = CONFIG.rendering.muzzleLightMs;
+    this.shotAnimationRemainingMs = CONFIG.rendering.viewmodel.animation.actionMs[weaponId];
     this.audio.playShot(weaponId);
     this.pushHudEvent({ type: 'shot' });
   }
@@ -1236,12 +1646,15 @@ export class PreludeScene {
     const sourcePlayerId = typeof event.playerId === 'string' ? event.playerId : '';
     if (event.type === 'weaponFired' && sourcePlayerId !== localPlayerId && isWeaponId(event.weaponId)) {
       this.audio.playShot(event.weaponId, this.playerAudioPoint(sourcePlayerId), true);
+      this.remotePlayers.get(sourcePlayerId)?.rig.playFire();
     }
     if (event.type === 'weaponReloaded' && sourcePlayerId !== localPlayerId && isWeaponId(event.weaponId)) {
       this.audio.playReload(event.weaponId, this.playerAudioPoint(sourcePlayerId));
+      this.remotePlayers.get(sourcePlayerId)?.rig.playReload();
     }
     if (event.type === 'meleeSwung' && sourcePlayerId !== localPlayerId) {
       this.audio.playMelee(this.playerAudioPoint(sourcePlayerId));
+      this.remotePlayers.get(sourcePlayerId)?.rig.playMelee();
     }
     if (event.type === 'powerupCollected' && typeof event.powerupType === 'string') {
       this.pushHudEvent({ type: 'points', amount: 0, reason: event.powerupType });
@@ -1558,16 +1971,22 @@ export class PreludeScene {
       }
       if (this.lamp !== null) {
         const flicker = Math.sin(elapsed * 31) > 0.965 ? 0.42 : 1;
-        this.lamp.intensity = 17 * flicker * (0.96 + Math.sin(elapsed * 7.1) * 0.04);
+        this.lamp.intensity = CONFIG.rendering.environment.menuLampIntensity * flicker * (0.96 + Math.sin(elapsed * 7.1) * 0.04);
       }
     } else {
       this.updateGameplay(delta);
     }
-    this.renderer.render(this.scene, this.camera);
+    this.renderer.info.reset();
+    const readout = this.getSimulationReadout();
+    this.post.render(elapsed, readout === null ? 1 : readout.hp / Math.max(1, readout.maxHp));
     this.elapsedSample += delta;
     this.sampledFrames += 1;
     if (this.elapsedSample >= 0.5) {
-      this.metrics = { fps: Math.round(this.sampledFrames / this.elapsedSample), drawCalls: this.renderer.info.render.calls };
+      this.metrics = {
+        fps: Math.round(this.sampledFrames / this.elapsedSample),
+        drawCalls: this.renderer.info.render.calls,
+        triangles: this.renderer.info.render.triangles,
+      };
       this.elapsedSample = 0;
       this.sampledFrames = 0;
     }
@@ -1579,6 +1998,7 @@ export class PreludeScene {
     this.camera.updateProjectionMatrix();
     this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, CONFIG.rendering.maxPixelRatio));
     this.renderer.setSize(window.innerWidth, window.innerHeight, false);
+    this.post.resize(window.innerWidth, window.innerHeight, Math.min(window.devicePixelRatio, CONFIG.rendering.maxPixelRatio));
   };
 
   private disposeObject(root: THREE.Object3D): void {
@@ -1639,6 +2059,8 @@ function combatStats(state: CombatPlayerState): SceneSimulationReadout['stats'] 
     kills: state.kills,
     headshots: state.headshots,
     pointsEarned: state.pointsEarned,
+    doorsOpened: state.doorsOpened,
+    crateRolls: state.crateRolls,
   };
 }
 

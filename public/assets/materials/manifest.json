@@ -1,0 +1,12 @@
+{
+  "version": 4,
+  "size": 2048,
+  "seed": 423997451,
+  "channels": [
+    "albedo",
+    "normal",
+    "roughness",
+    "ao",
+    "emissive"
+  ]
+}

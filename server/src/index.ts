@@ -1,5 +1,6 @@
 import { defineRoom, defineServer } from 'colyseus';
 import type { NextFunction, Request, Response } from 'express';
+import { CONFIG } from '../../src/config.js';
 import { StahlbunkerRoom } from './StahlbunkerRoom.js';
 
 const port = Number.parseInt(process.env.PORT ?? '2567', 10);
@@ -17,7 +18,7 @@ export const server = defineServer({
       next();
     });
     app.get('/health', (_request: Request, response: Response) => {
-      response.json({ ok: true, service: 'stahlbunker-server', protocolVersion: 1 });
+      response.json({ ok: true, service: 'stahlbunker-server', protocolVersion: CONFIG.coop.protocolVersion });
     });
   },
 });

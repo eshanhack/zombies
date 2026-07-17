@@ -48,6 +48,7 @@ interface WirePlayer {
 }
 
 interface WireState {
+  protocolVersion: number;
   seed: number;
   roomCode: string;
   hostId: string;
@@ -87,6 +88,41 @@ interface WireState {
   enemies: { forEach(callback: (enemy: NetworkEnemyView, key: string) => void): void };
   grenades: { forEach(callback: (grenade: NetworkGrenadeView, key: string) => void): void };
   powerups: { forEach(callback: (powerup: NetworkPowerupView, key: string) => void): void };
+}
+
+async function waitForProtocolVersion(room: Room): Promise<number> {
+  const initialVersion = Number((room.state as Partial<WireState>).protocolVersion);
+  if (Number.isFinite(initialVersion)) return initialVersion;
+
+  return new Promise<number>((resolve, reject) => {
+    let settled = false;
+
+    const cleanup = (): void => {
+      clearTimeout(timeoutId);
+      room.onStateChange.remove(onStateChange);
+      room.onLeave.remove(onLeave);
+    };
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      callback();
+    };
+    const onStateChange = (state: unknown): void => {
+      const version = Number((state as Partial<WireState>).protocolVersion);
+      if (!Number.isFinite(version)) return;
+      finish(() => resolve(version));
+    };
+    const onLeave = (): void => {
+      finish(() => reject(new Error('Server connection closed before the protocol handshake completed.')));
+    };
+    const timeoutId = setTimeout(() => {
+      finish(() => reject(new Error('Server protocol handshake timed out. Check the server connection and try again.')));
+    }, CONFIG.coop.handshakeTimeoutMs);
+
+    room.onStateChange(onStateChange);
+    room.onLeave(onLeave);
+  });
 }
 
 export interface NetworkBarrierView {
@@ -332,6 +368,19 @@ export class CoopClient {
   private async connect(roomPromise: Promise<Room>): Promise<void> {
     if (this.room !== null) await this.leave();
     const room = await roomPromise;
+    let serverProtocolVersion: number;
+    try {
+      serverProtocolVersion = await waitForProtocolVersion(room);
+    } catch (error) {
+      await room.leave(true);
+      throw error;
+    }
+    if (serverProtocolVersion !== CONFIG.coop.protocolVersion) {
+      await room.leave(true);
+      throw new Error(
+        `Server version mismatch · client ${CONFIG.coop.protocolVersion} / server ${serverProtocolVersion}. Refresh after the deployment completes.`,
+      );
+    }
     this.room = room;
     room.onMessage('runStarted', () => undefined);
     room.onMessage('combatFeedback', (message: Omit<Extract<NetworkFeedback, { kind: 'combat' }>, 'kind'>) => {
@@ -424,6 +473,9 @@ export class CoopClient {
         y: player.y,
         z: player.z,
         yaw: player.yaw,
+        pitch: player.pitch,
+        vx: player.vx,
+        vz: player.vz,
         connected: player.connected,
         downed: player.downed,
         spectating: player.spectating,

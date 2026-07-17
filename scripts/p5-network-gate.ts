@@ -93,12 +93,12 @@ try {
   const quickReviverPoints = player(host, host.sessionId)!.points;
   host.send('action', { type: 'interact', held: true });
   await delay(CONFIG.coop.reviveMs * CONFIG.coop.quickReviveMultiplier - 180);
-  if (!player(host, guestId)?.downed) throw new Error('Quick revive completed early.');
+  if (!player(host, guestId)?.downed) throw new Error('Accelerated revive completed early.');
   await delay(300);
   host.send('action', { type: 'interact', held: false });
   await waitFor(() => player(host, guestId)?.downed === false, 2000);
   if (player(host, host.sessionId)!.points !== quickReviverPoints + CONFIG.coop.reviveAward) throw new Error('Reviver did not receive exactly 50 points.');
-  mark('2.25-second quick revive synchronized');
+  mark('2.25-second accelerated revive synchronized');
 
   for (let hit = 0; hit < 2; hit += 1) {
     gate(host, { type: 'damage', damage: CONFIG.zombie.hitDamage });

@@ -1,5 +1,11 @@
 # Asset Credits
 
+## Generated production material atlases
+
+- `public/assets/materials/bunker_{albedo,normal,roughness,ao,emissive}.png`
+- Authored deterministically by `scripts/generate-material-atlas.ts` for Stahlbunker 1945.
+- License: original project work. No external source pixels are used.
+
 Stahlbunker 1945 currently uses no external visual or audio assets.
 
 - Geometry: original procedural Three.js geometry.
