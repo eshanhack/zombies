@@ -43,6 +43,7 @@ export const server = defineServer({
       next();
     });
     app.get('/health', (_request: Request, response: Response) => {
+      response.set('Cache-Control', 'no-store');
       response.json({
         ok: true,
         service: 'stahlbunker-server',
