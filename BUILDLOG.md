@@ -27,4 +27,28 @@ Status: passed
 
 ## P1 — Controller and original greybox
 
+Status: passed
+
+- Timestamp: 2026-07-17T12:55:45+10:00
+- Implementation commit: `cb5e0d1c59f2`
+- Browser seed: solo `12345`; four-client room `RYXC9E`, authoritative seed `1153375570`
+- Client count: 4
+- Automated checks:
+  - `npm run typecheck`: passed with zero diagnostics across client, tests, and gate scripts.
+  - `npm test`: 5 files / 19 tests passed.
+  - The 54-node hand-authored graph is unique, reciprocal, fully connected, and spans all four rooms.
+  - Fixed-step tests measured the canonical four-second sprint drain and three-second refill, capsule wall rejection, stair/Catwalk floor resolution, deterministic input replay, and solo noclip traversal.
+  - Four independent predicted states traversed Start Hall → Armory → Generator → stairs → Catwalk against the same authoritative collision world with zero numeric divergence.
+  - `npm run gate:p1:network`: four real Colyseus clients joined room `VRFT7S`, each traveled 3.15 m under server authority, acknowledged input 31, and reported exactly 0 m cross-client state divergence.
+  - `npm run build`: production PWA client and authoritative server passed.
+- Browser acceptance:
+  - Solo production preview entered the playable bunker and F1 reported seed `12345`, phase `playing`, player position `0.00, 0.00, -1.50`, 60 FPS, 25 visible draw calls, and offline cache `ready`.
+  - Noclip and navgraph controls toggled in the live solo runtime; co-op noclip remains rejected by the controller.
+  - Four independent browser tabs joined one private room, the host started the roster-locked run, and every tab transitioned to the first-person state.
+  - All four browser consoles remained empty after room creation, join, lock, and start.
+  - The embedded verification browser intentionally denies Pointer Lock; both Playwright and native click paths were exercised, rejection was handled without a console error, and the click-to-lock affordance remained available. Re-run the physical mouse-lock check in a direct production browser before P10 promotion.
+- Performance: 60 FPS in solo and four-client start scenes; 25 visible draw calls in the production solo view, well below the 150-call budget.
+
+## P2 — Barriers and enemies
+
 Status: in progress
