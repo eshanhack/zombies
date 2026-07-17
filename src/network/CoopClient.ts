@@ -302,7 +302,7 @@ export class CoopClient {
   private feedbackListener: FeedbackListener = () => undefined;
   private actionSequence = 0;
 
-  constructor(endpoint = import.meta.env.VITE_GAME_SERVER ?? CONFIG.coop.localServerUrl) {
+  constructor(endpoint = import.meta.env.VITE_GAME_SERVER_URL ?? CONFIG.coop.localServerUrl) {
     this.client = new Client(endpoint);
   }
 

@@ -1,0 +1,58 @@
+{
+  "observedAt": "2026-07-17T20:25:35+10:00",
+  "artifact": {
+    "bundle": "index-CabKoI4N.js",
+    "bytes": 951444,
+    "sha256": "0b9f7bd2cf1c07522c263dd08b4024b8ee2bf73b06651319af3c104f41b59de7"
+  },
+  "coldLoad": {
+    "viewport": "1920x1080",
+    "domContentLoadedMs": 432.1,
+    "loadEventEndMs": 861.4,
+    "targetMs": 3000,
+    "consoleErrors": 0
+  },
+  "offlineSolo": {
+    "serviceWorkerState": "activated",
+    "controlledBeforeOutage": true,
+    "liveServerFetchDuringOutage": "blocked",
+    "cachedReloadSucceeded": true,
+    "soloPhaseReached": "playing",
+    "consoleErrors": 0
+  },
+  "soloLoop": {
+    "menuToRoundOne": true,
+    "gameOverReportRendered": true,
+    "restartPhase": "playing",
+    "restartRound": 1,
+    "consoleErrors": 0
+  },
+  "twoBrowserCoop": {
+    "roomCode": "QAHDMB",
+    "authoritativeSeed": 238276012,
+    "players": 2,
+    "rosterReady": 2,
+    "hostStarted": true,
+    "bothClientsEnteredCoop": true,
+    "bothClientConsoleErrors": [0, 0]
+  },
+  "authoritativeNetworkGate": {
+    "protocolVersion": 2,
+    "twoPlayerRoom": "FN7CGC",
+    "fourPlayerRoom": "29NBCK",
+    "adversarialRoom": "GPSB6J",
+    "adversarialTravelM": 1.584,
+    "lateralDriftM": 0,
+    "duplicateActionFeedbackCount": 1,
+    "rewindAppliedMs": 200,
+    "simultaneousDoorBalances": [10520, 9750],
+    "fullTeamGameOver": true
+  },
+  "serverSecurityGate": {
+    "allowedOrigin": "http://127.0.0.1:4173",
+    "untrustedHealthAllowOrigin": null,
+    "untrustedPreflightAllowOrigin": "null",
+    "untrustedWebSocketStatus": 401,
+    "runtimeAuditVulnerabilities": 0
+  }
+}

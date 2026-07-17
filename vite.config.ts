@@ -14,7 +14,14 @@ export default defineConfig({
         background_color: '#080a09',
         display: 'fullscreen',
         orientation: 'landscape',
-        icons: [],
+        icons: [
+          {
+            src: 'favicon.svg',
+            sizes: 'any',
+            type: 'image/svg+xml',
+            purpose: 'any maskable',
+          },
+        ],
       },
       workbox: {
         globPatterns: ['**/*.{js,css,html,svg,png,woff2}'],

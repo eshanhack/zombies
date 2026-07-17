@@ -1,5 +1,5 @@
 import { randomBytes, randomInt } from 'node:crypto';
-import { Client, Room } from 'colyseus';
+import { Client, Room } from '@colyseus/core';
 import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../../src/config.js';
 import { DOORS, START_POSITIONS } from '../../src/map/blueprint.js';
 import {
