@@ -6,7 +6,7 @@ import { StahlbunkerRoom } from './StahlbunkerRoom.js';
 
 const port = Number.parseInt(process.env.PORT ?? '2567', 10);
 const clientOrigins = new Set(
-  (process.env.CLIENT_ORIGIN ?? 'http://127.0.0.1:5173,http://127.0.0.1:4173')
+  (process.env.CLIENT_ORIGIN ?? 'http://127.0.0.1:5173,http://127.0.0.1:4173,https://zombies-ebon.vercel.app')
     .split(',')
     .map((origin) => origin.trim())
     .filter(Boolean),
