@@ -33,9 +33,31 @@ app.append(scene.canvas);
 let activeSeed = seed;
 let activeMode: GameSnapshot['mode'] = 'solo';
 let activePhase: GameSnapshot['phase'] = 'menu';
+let gameplayStarted = false;
 const coop = new CoopClient();
 const getSnapshot = (): GameSnapshot => {
   const metrics = scene.getMetrics();
+  const controller = scene.getControllerReadout();
+  const players: GameSnapshot['players'] = controller === null ? [] : [{
+    id: 'local',
+    name: 'Wanderer',
+    position: { x: controller.x, y: controller.y, z: controller.z },
+    velocity: { x: controller.vx, y: controller.vy, z: controller.vz },
+    yaw: controller.yaw,
+    pitch: controller.pitch,
+    hp: CONFIG.player.maxHp,
+    maxHp: CONFIG.player.maxHp,
+    points: CONFIG.points.starting,
+    staminaMs: controller.staminaMs,
+    weapons: [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false }],
+    activeWeaponIndex: 0,
+    grenades: CONFIG.combat.maxGrenades,
+    perks: [],
+    downed: false,
+    spectating: false,
+    connected: true,
+    stats: { kills: 0, headshots: 0, shots: 0, hits: 0, pointsEarned: 0, doorsOpened: 0, crateRolls: 0, revives: 0, downs: 0 },
+  }];
   return {
     seed: activeSeed,
     mode: activeMode,
@@ -47,7 +69,7 @@ const getSnapshot = (): GameSnapshot => {
     elapsedMs: 0,
     powerOn: false,
     doorsOpen: [false, false, false],
-    players: [],
+    players,
     enemies: [],
     barriers: [],
     powerups: [],
@@ -56,11 +78,21 @@ const getSnapshot = (): GameSnapshot => {
   };
 };
 
+const startGameplay = (mode: GameSnapshot['mode']): void => {
+  if (gameplayStarted) return;
+  gameplayStarted = true;
+  activeMode = mode;
+  activePhase = mode === 'solo' ? 'playing' : 'intermission';
+  shell.startGameplay();
+  scene.enterGameplay({ mode, sendInput: mode === 'coop' ? (input) => coop.sendInput(input) : undefined });
+};
+
 const renderLobby = (view: LobbyView): void => {
   activeSeed = view.seed;
   activeMode = 'coop';
   activePhase = view.started ? 'intermission' : 'lobby';
-  shell.showLobby(view);
+  if (view.started) startGameplay('coop');
+  else shell.showLobby(view);
 };
 
 const shell = new AppShell(seed, scene, {
@@ -68,7 +100,7 @@ const shell = new AppShell(seed, scene, {
     if (action === 'join') shell.openJoin();
     if (action === 'settings') shell.openSettings();
     if (action === 'records') shell.openRecords();
-    if (action === 'solo') document.body.dispatchEvent(new CustomEvent('stahlbunker:start-solo'));
+    if (action === 'solo') startGameplay('solo');
     if (action === 'create') {
       void coop.create('Wanderer').catch((error: unknown) => {
         shell.openJoin();
@@ -95,12 +127,16 @@ const shell = new AppShell(seed, scene, {
 app.append(shell.root);
 shell.setSnapshotProvider(getSnapshot);
 coop.onLobbyChange(renderLobby);
+coop.onMovement((local, players) => {
+  if (local !== null) scene.reconcileLocalPlayer(local);
+  scene.updateRemotePlayers(players);
+});
 
 window.__STAHLBUNKER_DEBUG__ = {
   version: 1,
   seed,
   snapshot: getSnapshot,
-  command: () => false,
+  command: (name) => scene.command(name),
 };
 
 scene.start();

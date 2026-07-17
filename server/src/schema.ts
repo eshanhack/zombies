@@ -7,8 +7,14 @@ export class NetPlayer extends Schema {
   @type('float32') x: number = 0;
   @type('float32') y: number = CONFIG.controller.eyeHeightM;
   @type('float32') z: number = 0;
+  @type('float32') vx: number = 0;
+  @type('float32') vy: number = 0;
+  @type('float32') vz: number = 0;
   @type('float32') yaw: number = 0;
   @type('float32') pitch: number = 0;
+  @type('uint16') staminaMs: number = CONFIG.player.sprintMaxMs;
+  @type('uint32') lastProcessedInput: number = 0;
+  @type('boolean') grounded: boolean = true;
   @type('uint16') hp: number = CONFIG.player.maxHp;
   @type('uint32') points: number = CONFIG.points.starting;
   @type('boolean') ready: boolean = false;

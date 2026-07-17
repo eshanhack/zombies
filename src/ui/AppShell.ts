@@ -22,6 +22,10 @@ export class AppShell {
   private readonly settingsPanel: HTMLElement;
   private readonly recordsPanel: HTMLElement;
   private readonly lobbyPanel: HTMLElement;
+  private readonly hud: HTMLElement;
+  private readonly stamina: HTMLElement;
+  private readonly lockPrompt: HTMLButtonElement;
+  private readonly controllerValue: HTMLElement;
   private readonly handlers: AppShellHandlers;
   private snapshotProvider: () => GameSnapshot | null = () => null;
 
@@ -57,7 +61,7 @@ export class AppShell {
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P0 FOUNDATION</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P1 CONTROLLER / MAP</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -65,6 +69,7 @@ export class AppShell {
         <div><dt>Phase</dt><dd data-debug="phase">menu</dd></div>
         <div><dt>Round</dt><dd data-debug="round">0</dd></div>
         <div><dt>Spawn / alive / queued</dt><dd data-debug="counts">0 / 0 / 0</dd></div>
+        <div><dt>Controller</dt><dd data-debug="controller">menu</dd></div>
       </dl>
       <div class="debug-actions">
         <button data-debug-action="points">Give 10,000 points</button>
@@ -79,7 +84,32 @@ export class AppShell {
     `;
     this.metricValue = this.overlay.querySelector('[data-debug="metrics"]') as HTMLElement;
     this.seedValue = this.overlay.querySelector('[data-debug="seed"]') as HTMLElement;
+    this.controllerValue = this.overlay.querySelector('[data-debug="controller"]') as HTMLElement;
     this.root.append(this.overlay);
+
+    this.hud = document.createElement('section');
+    this.hud.className = 'game-hud is-hidden';
+    this.hud.setAttribute('aria-label', 'Player status');
+    this.hud.innerHTML = `
+      <div class="crosshair" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="stamina-meter" aria-label="Sprint stamina"><span></span></div>
+    `;
+    this.stamina = this.hud.querySelector('.stamina-meter') as HTMLElement;
+    this.root.append(this.hud);
+
+    this.lockPrompt = document.createElement('button');
+    this.lockPrompt.type = 'button';
+    this.lockPrompt.className = 'pointer-lock-prompt is-hidden';
+    this.lockPrompt.textContent = 'Click to enter the bunker';
+    this.lockPrompt.addEventListener('click', () => {
+      if (scene.getControllerReadout()?.locked) return;
+      try {
+        void scene.canvas.requestPointerLock().catch(() => undefined);
+      } catch {
+        // The embedded verification browser can reject pointer lock without affecting gameplay state.
+      }
+    });
+    this.root.append(this.lockPrompt);
 
     this.joinPanel = document.createElement('form');
     this.joinPanel.className = 'modal-card is-hidden';
@@ -126,6 +156,9 @@ export class AppShell {
     this.root.querySelectorAll<HTMLButtonElement>('.modal-close').forEach((button) => {
       button.addEventListener('click', () => this.closeModals());
     });
+    this.overlay.querySelectorAll<HTMLButtonElement>('[data-debug-action]').forEach((button) => {
+      button.addEventListener('click', () => window.__STAHLBUNKER_DEBUG__?.command(button.dataset.debugAction ?? ''));
+    });
     this.joinPanel.addEventListener('submit', (event) => {
       event.preventDefault();
       const fields = new FormData(this.joinPanel);
@@ -154,6 +187,14 @@ export class AppShell {
       this.metricValue.textContent = `${metrics.fps} FPS · ${metrics.drawCalls} calls`;
       const snapshot = this.snapshotProvider();
       if (snapshot !== null) this.renderSnapshot(snapshot);
+      const controller = scene.getControllerReadout();
+      if (controller !== null) {
+        const staminaPercent = controller.staminaMs / CONFIG.player.sprintMaxMs;
+        this.stamina.style.setProperty('--stamina', `${Math.round(staminaPercent * 100)}%`);
+        this.stamina.classList.toggle('is-active', controller.sprinting || controller.staminaMs < CONFIG.player.sprintMaxMs - CONFIG.controller.staminaDisplayEpsilonMs);
+        this.lockPrompt.classList.toggle('is-hidden', controller.locked);
+        this.controllerValue.textContent = `${controller.x.toFixed(2)}, ${controller.y.toFixed(2)}, ${controller.z.toFixed(2)}${controller.noclip ? ' · NOCLIP' : ''}`;
+      }
     }, 250);
   }
 
@@ -187,6 +228,14 @@ export class AppShell {
   setOfflineStatus(status: string): void {
     const value = this.overlay.querySelector<HTMLElement>('[data-debug="offline"]');
     if (value !== null) value.textContent = status;
+  }
+
+  startGameplay(): void {
+    this.closeModals();
+    this.hideLobby();
+    this.root.classList.add('is-gameplay');
+    this.hud.classList.remove('is-hidden');
+    this.lockPrompt.classList.remove('is-hidden');
   }
 
   showLobby(view: LobbyView): void {

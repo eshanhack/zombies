@@ -119,6 +119,16 @@ export const CONFIG = {
     bobFrequency: 9,
     bobAmountM: 0.018,
     swayAmount: 0.0012,
+    groundAccelerationMps2: 34,
+    groundDecelerationMps2: 28,
+    airAccelerationMps2: 5,
+    maxStepHeightM: 0.45,
+    noclipSpeedMps: 8,
+    reconcileSoftDistanceM: 0.05,
+    reconcileSnapDistanceM: 0.8,
+    reconcileBlend: 0.35,
+    maxPredictionHistory: 180,
+    staminaDisplayEpsilonMs: 20,
   },
 
   barriers: {
@@ -260,6 +270,8 @@ export const CONFIG = {
     maxDisplayNameLength: 16,
     maxMessagesPerSecond: 90,
     earlyRoundFactors: [0.25, 0.3, 0.5, 0.7, 0.9],
+    playerCollisionRadiusM: 0.35,
+    spawnSpacingM: 0.9,
   },
 
   wolves: {
@@ -285,6 +297,8 @@ export const CONFIG = {
     corridorWidthM: 2,
     doorWidthM: 1.8,
     doorHeightM: 2.7,
+    wallHeightM: 3.5,
+    startPosition: { x: 0, y: 0, z: -1.5 },
   },
 
   rendering: {
@@ -300,6 +314,16 @@ export const CONFIG = {
     drawCallBudget: 150,
     targetFps: 60,
     stressSampleMs: 30000,
+    cameraNearM: 0.05,
+    cameraFarM: 100,
+    viewmodel: {
+      hip: [0.3, -0.27, -0.5],
+      ads: [0, -0.195, -0.42],
+      sprint: [0.4, -0.4, -0.34],
+      sprintRollRad: -0.42,
+      positionLerpPerSecond: 12,
+      rotationLerpPerSecond: 14,
+    },
   },
 
   audio: {

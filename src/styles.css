@@ -19,6 +19,11 @@ button, input { font: inherit; }
 
 .game-canvas { position: fixed; inset: 0; width: 100%; height: 100%; display: block; }
 .app-shell { position: fixed; inset: 0; overflow: hidden; }
+.app-shell.is-gameplay { pointer-events: none; }
+.app-shell.is-gameplay .menu-panel,
+.app-shell.is-gameplay .status-rail { display: none; }
+.app-shell.is-gameplay .debug-overlay,
+.app-shell.is-gameplay .pointer-lock-prompt { pointer-events: auto; }
 .app-shell::before {
   content: "";
   position: absolute;
@@ -100,6 +105,19 @@ h1 span + span { color: var(--blood); background: linear-gradient(#ce3334, #7810
   color: #c8d2cd;
   font: 12px/1.4 Consolas, monospace;
 }
+.game-hud { position: fixed; inset: 0; z-index: 10; pointer-events: none; }
+.crosshair { position: absolute; left: 50%; top: 50%; width: 34px; height: 34px; transform: translate(-50%, -50%); filter: drop-shadow(0 1px 1px #000); }
+.crosshair i { position: absolute; display: block; background: rgba(238, 235, 220, 0.82); }
+.crosshair i:nth-child(1), .crosshair i:nth-child(2) { width: 8px; height: 1px; top: 16px; }
+.crosshair i:nth-child(1) { left: 1px; }
+.crosshair i:nth-child(2) { right: 1px; }
+.crosshair i:nth-child(3), .crosshair i:nth-child(4) { width: 1px; height: 8px; left: 16px; }
+.crosshair i:nth-child(3) { top: 1px; }
+.crosshair i:nth-child(4) { bottom: 1px; }
+.stamina-meter { --stamina: 100%; position: absolute; left: 50%; bottom: 42px; width: 176px; height: 3px; transform: translateX(-50%); overflow: hidden; background: rgba(255,255,255,.08); opacity: 0; transition: opacity 150ms ease; }
+.stamina-meter.is-active { opacity: 1; }
+.stamina-meter span { display: block; width: var(--stamina); height: 100%; background: linear-gradient(90deg, #6b7772, #d8d5c7); box-shadow: 0 0 6px rgba(220,225,215,.35); }
+.pointer-lock-prompt { position: fixed; z-index: 15; left: 50%; top: 72%; transform: translate(-50%, -50%); border: 1px solid rgba(220, 218, 202, .22); background: rgba(5, 8, 7, .82); color: #c9c5b5; padding: 12px 20px; font: 600 11px/1 var(--font-mono); letter-spacing: .16em; text-transform: uppercase; cursor: pointer; }
 .debug-overlay header { display: flex; justify-content: space-between; border-bottom: 1px solid #293431; padding: 10px 12px; color: #a7c2b8; }
 .debug-overlay header span { color: #65716d; }
 .debug-overlay dl { margin: 0; padding: 8px 12px; }

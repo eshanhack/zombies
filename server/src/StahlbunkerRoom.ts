@@ -1,20 +1,19 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { Client, Room } from 'colyseus';
 import { CONFIG } from '../../src/config.js';
+import { START_POSITIONS } from '../../src/map/blueprint.js';
+import {
+  createCollisionWorld,
+  resolvePlayerSeparation,
+  sanitizeMovementInput,
+  simulatePlayerMovement,
+  type MovementInput,
+} from '../../src/shared/movement.js';
 import { BunkerState, NetPlayer } from './schema.js';
 
 interface JoinOptions {
   name?: string;
   resumeToken?: string;
-}
-
-interface InputMessage {
-  sequence: number;
-  forward: number;
-  right: number;
-  yaw: number;
-  pitch: number;
-  sprint: boolean;
 }
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -37,6 +36,8 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
   patchRate = CONFIG.coop.patchRateMs;
   maxMessagesPerSecond = CONFIG.coop.maxMessagesPerSecond;
   private readonly inputSequences = new Map<string, number>();
+  private readonly latestInputs = new Map<string, MovementInput>();
+  private readonly collisionWorld = createCollisionWorld();
 
   onCreate(): void {
     const seed = randomBytes(4).readUInt32LE(0);
@@ -48,6 +49,17 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.setPrivate(true);
     this.setSimulationInterval((deltaMs) => {
       this.state.serverTimeMs += deltaMs;
+      if (!this.state.started) return;
+      const players = [...this.state.players.values()].filter((player) => player.connected && !player.spectating && !player.downed);
+      for (const player of players) {
+        const input = this.latestInputs.get(player.id);
+        if (input === undefined) continue;
+        simulatePlayerMovement(player, input, 1 / CONFIG.simulation.hz, this.collisionWorld);
+        player.yaw = input.yaw;
+        player.pitch = input.pitch;
+        player.lastProcessedInput = input.sequence;
+      }
+      resolvePlayerSeparation(players);
     }, 1000 / CONFIG.simulation.hz);
 
     this.onMessage('ready', (client, ready: boolean) => {
@@ -61,16 +73,15 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       this.lock();
       this.broadcast('runStarted', { seed: this.state.seed, roster: this.state.players.size });
     });
-    this.onMessage('input', (client, input: InputMessage) => {
-      if (!this.state.started || !Number.isFinite(input.sequence)) return;
+    this.onMessage('input', (client, unsafeInput: MovementInput) => {
+      if (!this.state.started || !Number.isFinite(unsafeInput.sequence)) return;
+      const input = sanitizeMovementInput(unsafeInput);
       const prior = this.inputSequences.get(client.sessionId) ?? -1;
       if (input.sequence <= prior) return;
       this.inputSequences.set(client.sessionId, input.sequence);
       const player = this.state.players.get(client.sessionId);
       if (player === undefined || player.spectating || player.downed) return;
-      player.yaw = Number.isFinite(input.yaw) ? input.yaw : player.yaw;
-      player.pitch = Number.isFinite(input.pitch) ? input.pitch : player.pitch;
-      client.send('inputAck', { sequence: input.sequence, x: player.x, y: player.y, z: player.z });
+      this.latestInputs.set(client.sessionId, input);
     });
     this.onMessage('ping', (client, sentAt: number) => client.send('pong', sentAt));
   }
@@ -79,12 +90,18 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     const player = new NetPlayer();
     player.id = client.sessionId;
     player.name = cleanName(options.name);
+    const spawn = START_POSITIONS[this.state.players.size] ?? CONFIG.map.startPosition;
+    player.x = spawn.x;
+    player.y = spawn.y;
+    player.z = spawn.z;
     this.state.players.set(client.sessionId, player);
     if (this.state.hostId === '') this.state.hostId = client.sessionId;
 
   }
 
   onLeave(client: Client): void {
+    this.latestInputs.delete(client.sessionId);
+    this.inputSequences.delete(client.sessionId);
     const player = this.state.players.get(client.sessionId);
     if (player !== undefined) player.connected = false;
     if (!this.state.started) {
@@ -97,5 +114,6 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
 
   onDispose(): void {
     this.inputSequences.clear();
+    this.latestInputs.clear();
   }
 }

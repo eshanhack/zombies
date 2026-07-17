@@ -14,6 +14,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
+    "gate:p1:network": "tsx scripts/p1-network-gate.ts",
     "check": "npm run typecheck && npm run test && npm run build",
     "preview": "vite preview --host 127.0.0.1",
     "start:server": "node dist-server/server/src/index.js"
