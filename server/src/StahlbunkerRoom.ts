@@ -1,6 +1,6 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { Client, Room } from 'colyseus';
-import { CONFIG } from '../../src/config.js';
+import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../../src/config.js';
 import { START_POSITIONS } from '../../src/map/blueprint.js';
 import {
   createCollisionWorld,
@@ -9,9 +9,16 @@ import {
   simulatePlayerMovement,
   type MovementInput,
 } from '../../src/shared/movement.js';
-import { GameSimulation, type SimBarrier, type SimEnemy, type SimGrenade, type SimulationEvent } from '../../src/shared/GameSimulation.js';
+import {
+  GameSimulation,
+  type SimBarrier,
+  type SimEnemy,
+  type SimGrenade,
+  type SimPowerup,
+  type SimulationEvent,
+} from '../../src/shared/GameSimulation.js';
 import type { CombatPlayerState } from '../../src/shared/combat.js';
-import { BunkerState, NetBarrier, NetEnemy, NetGrenade, NetPlayer, NetWeapon } from './schema.js';
+import { BunkerState, NetBarrier, NetEnemy, NetGrenade, NetPlayer, NetPowerup, NetWeapon } from './schema.js';
 
 interface JoinOptions {
   name?: string;
@@ -28,11 +35,15 @@ interface ActionMessage {
 
 interface GateMessage {
   version: number;
-  type: 'grantPoints' | 'teleport' | 'grantWeapon';
+  type: 'grantPoints' | 'teleport' | 'grantWeapon' | 'grantPerk' | 'setPower' | 'spawnPowerup' | 'damage' | 'startRound' | 'killAll';
   x?: number;
   y?: number;
   z?: number;
   weaponId?: string;
+  perkId?: string;
+  powerupType?: string;
+  damage?: number;
+  round?: number;
 }
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -59,6 +70,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
   private readonly collisionWorld = createCollisionWorld();
   private simulation: GameSimulation | null = null;
   private simulationAccumulatorMs = 0;
+  private emptyRoomTimer: ReturnType<typeof setTimeout> | null = null;
 
   onCreate(): void {
     const seed = randomBytes(4).readUInt32LE(0);
@@ -71,7 +83,12 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.setSimulationInterval((deltaMs) => {
       this.state.serverTimeMs += deltaMs;
       if (!this.state.started) return;
-      const players = [...this.state.players.values()].filter((player) => player.connected && !player.spectating && !player.downed);
+      const allPlayers = [...this.state.players.values()];
+      if (!allPlayers.some((player) => player.connected)) {
+        this.state.phase = 'paused';
+        return;
+      }
+      const players = allPlayers.filter((player) => player.connected && !player.spectating && !player.downed);
       const simulation = this.simulation;
       if (simulation === null) return;
       const fixedDeltaMs = 1000 / CONFIG.simulation.hz;
@@ -87,7 +104,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
           player.lastProcessedInput = input.sequence;
         }
         resolvePlayerSeparation(players);
-        simulation.update(fixedDeltaMs, players);
+        simulation.update(fixedDeltaMs, allPlayers);
         this.publishSimulationEvents(simulation.drainEvents());
         this.simulationAccumulatorMs -= fixedDeltaMs;
         subSteps += 1;
@@ -103,6 +120,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.onMessage('start', (client) => {
       if (this.state.started || client.sessionId !== this.state.hostId) return;
       this.state.started = true;
+      this.autoDispose = false;
       this.state.phase = 'playing';
       this.simulation = new GameSimulation({ seed: this.state.seed, mode: 'coop', rosterSize: this.state.players.size });
       this.simulationAccumulatorMs = 0;
@@ -123,7 +141,8 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.onMessage('action', (client, action: ActionMessage) => {
       const simulation = this.simulation;
       const player = this.state.players.get(client.sessionId);
-      if (simulation === null || player === undefined || player.spectating || player.downed || action === null || typeof action !== 'object') return;
+      if (simulation === null || player === undefined || player.spectating || simulation.gameOver || action === null || typeof action !== 'object') return;
+      if (player.downed && action.type !== 'fire' && action.type !== 'reload') return;
       if (action.type === 'melee') {
         const result = simulation.melee(player);
         client.send('combatFeedback', { source: 'melee', ...result });
@@ -163,17 +182,34 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       }
       if (message.type === 'grantWeapon' && typeof message.weaponId === 'string'
         && Object.prototype.hasOwnProperty.call(CONFIG.weapons, message.weaponId)) {
-        const combat = simulation.grantWeapon(player.id, message.weaponId as keyof typeof CONFIG.weapons);
+        const combat = simulation.grantWeapon(player.id, message.weaponId as WeaponId);
         combat.switchReadyAtMs = simulation.elapsedMs;
         const weapon = combat.weapons[combat.activeWeaponIndex];
         if (weapon !== undefined) weapon.readyAtMs = simulation.elapsedMs;
       }
+      if (message.type === 'grantPerk' && typeof message.perkId === 'string'
+        && Object.prototype.hasOwnProperty.call(CONFIG.perks, message.perkId)) {
+        simulation.grantPerk(player, message.perkId as PerkId);
+      }
+      if (message.type === 'setPower') simulation.setPowerOn(true);
+      if (message.type === 'spawnPowerup' && isPowerupId(message.powerupType)) {
+        simulation.debugSpawnPowerup(message.powerupType, player.x, player.y, player.z);
+      }
+      if (message.type === 'damage' && Number.isFinite(message.damage)) {
+        simulation.applyPlayerDamage(player, Math.max(0, message.damage ?? 0));
+      }
+      if (message.type === 'startRound' && Number.isFinite(message.round)) {
+        const round = Math.max(1, Math.floor(message.round ?? 1));
+        simulation.debugStartRound(round, [...this.state.players.values()]);
+      }
+      if (message.type === 'killAll') simulation.killAll();
       this.syncSimulation(simulation);
       client.send('gateAck', { accepted: true, type: message.type });
     });
   }
 
   onJoin(client: Client, options: JoinOptions): void {
+    this.clearEmptyRoomTimer();
     const player = new NetPlayer();
     player.id = client.sessionId;
     player.name = cleanName(options.name);
@@ -188,26 +224,66 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
 
   }
 
-  onLeave(client: Client): void {
-    this.latestInputs.delete(client.sessionId);
-    this.inputSequences.delete(client.sessionId);
-    this.simulation?.setRepairHeld(client.sessionId, false);
-    this.simulation?.setInteractionHeld(client.sessionId, false);
-    const player = this.state.players.get(client.sessionId);
-    if (player !== undefined) player.connected = false;
-    if (!this.state.started) {
-      this.state.players.delete(client.sessionId);
-      if (this.state.hostId === client.sessionId) {
-        this.state.hostId = this.state.players.keys().next().value ?? '';
-      }
+  onDrop(client: Client): void {
+    this.markDisconnected(client.sessionId);
+    if (this.state.started) {
+      void this.allowReconnection(client, CONFIG.coop.reconnectRoomRetentionMs / 1000);
     }
   }
 
+  onReconnect(client: Client): void {
+    this.clearEmptyRoomTimer();
+    const player = this.state.players.get(client.sessionId);
+    if (player === undefined) return;
+    player.connected = true;
+    player.ready = true;
+    this.simulation?.markReconnectPending(player);
+    if (this.simulation !== null) this.syncSimulation(this.simulation);
+    this.broadcast('gameEvent', { type: 'playerReconnected', playerId: player.id });
+  }
+
+  onLeave(client: Client): void {
+    this.markDisconnected(client.sessionId);
+  }
+
+  private markDisconnected(sessionId: string): void {
+    this.latestInputs.delete(sessionId);
+    this.inputSequences.delete(sessionId);
+    this.simulation?.setRepairHeld(sessionId, false);
+    this.simulation?.setInteractionHeld(sessionId, false);
+    const player = this.state.players.get(sessionId);
+    if (player !== undefined) player.connected = false;
+    if (!this.state.started) {
+      this.state.players.delete(sessionId);
+      if (this.state.hostId === sessionId) {
+        this.state.hostId = this.state.players.keys().next().value ?? '';
+      }
+      return;
+    }
+    if (![...this.state.players.values()].some((candidate) => candidate.connected)) this.scheduleEmptyRoomDisposal();
+  }
+
   onDispose(): void {
+    this.clearEmptyRoomTimer();
     this.inputSequences.clear();
     this.latestInputs.clear();
     this.simulation = null;
     this.simulationAccumulatorMs = 0;
+  }
+
+  private scheduleEmptyRoomDisposal(): void {
+    if (this.emptyRoomTimer !== null) return;
+    this.state.phase = 'paused';
+    this.emptyRoomTimer = setTimeout(() => {
+      this.emptyRoomTimer = null;
+      void this.disconnect(CONFIG.coop.consentedCloseCode);
+    }, CONFIG.coop.reconnectRoomRetentionMs);
+  }
+
+  private clearEmptyRoomTimer(): void {
+    if (this.emptyRoomTimer === null) return;
+    clearTimeout(this.emptyRoomTimer);
+    this.emptyRoomTimer = null;
   }
 
   private syncSimulation(simulation: GameSimulation): void {
@@ -216,7 +292,16 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.state.queued = simulation.queued;
     this.state.alive = simulation.aliveCount;
     this.state.simulationTimeMs = simulation.elapsedMs;
-    this.state.phase = simulation.phase === 'active' ? 'playing' : 'intermission';
+    this.state.phase = simulation.gameOver ? 'gameover' : simulation.phase === 'active' ? 'playing' : 'intermission';
+    this.state.roundKind = simulation.roundKind;
+    this.state.nextWolfRound = simulation.nextWolfRound;
+    this.state.wolfAppearance = simulation.wolfAppearance;
+    this.state.powerOn = simulation.powerOn;
+    this.state.powerActivationElapsedMs = simulation.powerActivationElapsedMs;
+    this.state.gameOver = simulation.gameOver;
+    this.state.instaKillRemainingMs = simulation.effects.instaKillRemainingMs;
+    this.state.doublePointsRemainingMs = simulation.effects.doublePointsRemainingMs;
+    this.state.nukeRemainingMs = simulation.effects.nukeRemainingMs;
 
     for (const barrier of simulation.barriers.values()) this.syncBarrier(barrier);
     const activeBarrierIds = new Set(simulation.barriers.keys());
@@ -247,7 +332,17 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     for (const grenade of simulation.grenades.values()) this.syncGrenade(grenade);
     const activeGrenadeIds = new Set([...simulation.grenades.keys()].map(String));
     for (const id of this.state.grenades.keys()) if (!activeGrenadeIds.has(id)) this.state.grenades.delete(id);
-    for (const player of this.state.players.values()) this.syncCombatPlayer(player, simulation.getCombatState(player.id), simulation.elapsedMs);
+    for (const powerup of simulation.powerups.values()) this.syncPowerup(powerup);
+    const activePowerupIds = new Set([...simulation.powerups.keys()].map(String));
+    for (const id of this.state.powerups.keys()) if (!activePowerupIds.has(id)) this.state.powerups.delete(id);
+    for (const player of this.state.players.values()) {
+      this.syncCombatPlayer(player, simulation.getCombatState(player.id), simulation.elapsedMs);
+      const life = simulation.getLifeState(player.id);
+      player.bleedoutRemainingMs = life.bleedoutRemainingMs;
+      player.selfReviveRemainingMs = life.selfReviveRemainingMs;
+      player.dead = life.dead;
+      player.reconnectPending = life.reconnectPending;
+    }
   }
 
   private syncCombatPlayer(player: NetPlayer, source: CombatPlayerState, elapsedMs: number): void {
@@ -279,6 +374,13 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     player.doorsOpened = source.doorsOpened;
     player.crateRolls = source.crateRolls;
     player.grenades = source.grenades;
+    if (player.perks.length !== source.perks.length || source.perks.some((perk, index) => player.perks[index] !== perk)) {
+      player.perks.splice(0, player.perks.length);
+      for (const perk of source.perks) player.perks.push(perk);
+    }
+    player.pendingPerk = source.pendingPerk;
+    player.actionLockRemainingMs = Math.max(0, source.actionLockedUntilMs - elapsedMs);
+    player.selfRevivesRemaining = source.selfRevivesRemaining;
   }
 
   private publishSimulationEvents(events: readonly SimulationEvent[]): void {
@@ -294,6 +396,10 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         this.clientBySessionId(event.playerId)?.send('pointTransaction', { amount: event.amount, reason: event.reason });
         this.logPointTransaction(event.playerId, event.amount, event.reason);
       }
+      if (event.type === 'powerActivated' || event.type === 'perkPurchaseStarted' || event.type === 'perkGranted'
+        || event.type === 'powerupSpawned' || event.type === 'powerupCollected' || event.type === 'playerDowned'
+        || event.type === 'playerRevived' || event.type === 'playerBledOut' || event.type === 'playerReturned'
+        || event.type === 'gameOver') this.broadcast('gameEvent', event);
     }
   }
 
@@ -356,4 +462,24 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     target.z = source.z;
     target.fuseRemainingMs = source.fuseRemainingMs;
   }
+
+  private syncPowerup(source: SimPowerup): void {
+    const key = String(source.id);
+    let target = this.state.powerups.get(key);
+    if (target === undefined) {
+      target = new NetPowerup();
+      target.id = source.id;
+      this.state.powerups.set(key, target);
+    }
+    target.powerupType = source.type;
+    target.x = source.x;
+    target.y = source.y;
+    target.z = source.z;
+    target.remainingMs = source.remainingMs;
+    target.guaranteed = source.guaranteed;
+  }
+}
+
+function isPowerupId(value: unknown): value is PowerupId {
+  return value === 'instaKill' || value === 'doublePoints' || value === 'nuke' || value === 'maxAmmo' || value === 'carpenter';
 }

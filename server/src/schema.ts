@@ -42,6 +42,14 @@ export class NetPlayer extends Schema {
   @type('uint16') doorsOpened: number = 0;
   @type('uint16') crateRolls: number = 0;
   @type('uint8') grenades: number = CONFIG.combat.maxGrenades;
+  @type(['string']) perks: ArraySchema<string> = new ArraySchema<string>();
+  @type('string') pendingPerk: string = '';
+  @type('float32') actionLockRemainingMs: number = 0;
+  @type('uint8') selfRevivesRemaining: number = CONFIG.perkRuntime.soloSelfReviveStock;
+  @type('float32') bleedoutRemainingMs: number = 0;
+  @type('float32') selfReviveRemainingMs: number = 0;
+  @type('boolean') dead: boolean = false;
+  @type('boolean') reconnectPending: boolean = false;
 }
 
 export class NetBarrier extends Schema {
@@ -78,6 +86,16 @@ export class NetGrenade extends Schema {
   @type('float32') fuseRemainingMs: number = 0;
 }
 
+export class NetPowerup extends Schema {
+  @type('uint32') id: number = 0;
+  @type('string') powerupType: string = 'maxAmmo';
+  @type('float32') x: number = 0;
+  @type('float32') y: number = 0;
+  @type('float32') z: number = 0;
+  @type('float32') remainingMs: number = CONFIG.powerups.despawnMs;
+  @type('boolean') guaranteed: boolean = false;
+}
+
 export class BunkerState extends Schema {
   @type('uint32') seed: number = CONFIG.simulation.seedFallback;
   @type('string') roomCode: string = '';
@@ -87,8 +105,16 @@ export class BunkerState extends Schema {
   @type('uint16') spawned: number = 0;
   @type('uint16') queued: number = 0;
   @type('uint16') alive: number = 0;
+  @type('string') roundKind: string = 'zombies';
+  @type('uint16') nextWolfRound: number = 0;
+  @type('uint16') wolfAppearance: number = 0;
   @type('boolean') started: boolean = false;
   @type('boolean') powerOn: boolean = false;
+  @type('float32') powerActivationElapsedMs: number = 0;
+  @type('boolean') gameOver: boolean = false;
+  @type('float32') instaKillRemainingMs: number = 0;
+  @type('float32') doublePointsRemainingMs: number = 0;
+  @type('float32') nukeRemainingMs: number = 0;
   @type('float64') serverTimeMs: number = 0;
   @type('float64') simulationTimeMs: number = 0;
   @type(['string']) openDoors: ArraySchema<string> = new ArraySchema<string>();
@@ -104,4 +130,5 @@ export class BunkerState extends Schema {
   @type({ map: NetBarrier }) barriers: MapSchema<NetBarrier> = new MapSchema<NetBarrier>();
   @type({ map: NetEnemy }) enemies: MapSchema<NetEnemy> = new MapSchema<NetEnemy>();
   @type({ map: NetGrenade }) grenades: MapSchema<NetGrenade> = new MapSchema<NetGrenade>();
+  @type({ map: NetPowerup }) powerups: MapSchema<NetPowerup> = new MapSchema<NetPowerup>();
 }

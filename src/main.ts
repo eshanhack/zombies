@@ -54,10 +54,10 @@ const getSnapshot = (): GameSnapshot => {
     staminaMs: controller.staminaMs,
     weapons: simulation?.weapons.map((weapon) => ({ ...weapon })) ?? [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false }],
     activeWeaponIndex: simulation?.activeWeaponIndex ?? 0,
-    grenades: CONFIG.combat.maxGrenades,
-    perks: [],
-    downed: (simulation?.hp ?? CONFIG.player.maxHp) <= 0,
-    spectating: false,
+    grenades: simulation?.grenades ?? CONFIG.combat.maxGrenades,
+    perks: simulation?.perks.slice() ?? [],
+    downed: simulation?.downed ?? false,
+    spectating: simulation?.spectating ?? false,
     connected: true,
     stats: {
       kills: simulation?.stats.kills ?? 0,
@@ -76,12 +76,12 @@ const getSnapshot = (): GameSnapshot => {
     mode: activeMode,
     phase: simulation?.phase ?? activePhase,
     round: simulation?.round ?? 0,
-    roundIsWolves: false,
+    roundIsWolves: simulation?.roundKind === 'wolves',
     spawned: simulation?.spawned ?? 0,
     queued: simulation?.queued ?? 0,
     elapsedMs: simulation?.elapsedMs ?? 0,
-    powerOn: false,
-    doorsOpen: [false, false, false],
+    powerOn: simulation?.powerOn ?? false,
+    doorsOpen: ['doorA', 'doorB', 'doorC'].map((doorId) => simulation?.openDoors.includes(doorId) ?? false),
     players,
     enemies: simulation?.enemies.map((enemy) => ({
       id: enemy.id,
@@ -104,7 +104,12 @@ const getSnapshot = (): GameSnapshot => {
       room: normalizeRoom(barrier.room),
       boards: barrier.boards,
     })) ?? [],
-    powerups: [],
+    powerups: simulation?.powerups.map((powerup) => ({
+      id: powerup.id,
+      type: powerup.powerupType,
+      position: { x: powerup.x, y: powerup.y, z: powerup.z },
+      spawnedAtMs: simulation.elapsedMs - (CONFIG.powerups.despawnMs - powerup.remainingMs),
+    })) ?? [],
     drawCalls: metrics.drawCalls,
     fps: metrics.fps,
   };
@@ -138,6 +143,14 @@ const shell = new AppShell(seed, scene, {
     if (action === 'settings') shell.openSettings();
     if (action === 'records') shell.openRecords();
     if (action === 'solo') startGameplay('solo');
+    if (action === 'resume') {
+      void coop.resume().then((resumed) => {
+        if (!resumed) throw new Error('No resumable operation was found.');
+      }).catch((error: unknown) => {
+        shell.openJoin();
+        shell.setJoinStatus(error instanceof Error ? error.message : 'The prior operation has expired.', true);
+      });
+    }
     if (action === 'create') {
       void coop.create('Wanderer').catch((error: unknown) => {
         shell.openJoin();
@@ -160,7 +173,7 @@ const shell = new AppShell(seed, scene, {
     activeMode = 'solo';
     activePhase = 'menu';
   },
-});
+}, coop.hasResumeToken());
 app.append(shell.root);
 shell.setSnapshotProvider(getSnapshot);
 coop.onLobbyChange(renderLobby);

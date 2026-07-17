@@ -1,4 +1,4 @@
-import { CONFIG, type RoomId, type WeaponId } from '../config.js';
+import { CONFIG, type PerkId, type RoomId, type WeaponId } from '../config.js';
 
 export type ColliderKind = 'wall' | 'door' | 'obstacle' | 'railing';
 
@@ -50,6 +50,24 @@ export interface CrateLocationBlueprint {
   yaw: number;
 }
 
+export interface PerkMachineBlueprint {
+  id: PerkId;
+  room: RoomId;
+  color: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
+export interface FogBankBlueprint {
+  id: string;
+  room: RoomId;
+  x: number;
+  y: number;
+  z: number;
+}
+
 export type WindowFacing = 'north' | 'south' | 'east' | 'west';
 
 export interface WindowBlueprint {
@@ -96,6 +114,30 @@ export const CRATE_LOCATIONS: readonly CrateLocationBlueprint[] = [
   { id: 'crate-armory', room: 'armory', x: -10.5, y: 0, z: 12.3, yaw: 0.18 },
   { id: 'crate-generator', room: 'generator', x: 9.6, y: 0, z: 14.7, yaw: -0.35 },
   { id: 'crate-start', room: 'start', x: 4.3, y: 0, z: 1.8, yaw: Math.PI },
+] as const;
+
+export const POWER_SWITCH = {
+  id: 'generator-breaker',
+  room: 'generator' as const,
+  x: 2.05,
+  y: 1.2,
+  z: 16.62,
+  yaw: Math.PI,
+} as const;
+
+export const PERK_MACHINES: readonly PerkMachineBlueprint[] = [
+  { id: 'eisenbrau', room: 'armory', color: 0x671c20, x: -14.58, y: 0, z: 15.45, yaw: Math.PI / 2 },
+  { id: 'schnellwasser', room: 'generator', color: 0x75c7a7, x: 12.45, y: 0, z: 15.85, yaw: -Math.PI / 2 },
+  { id: 'doppelschuss', room: 'catwalk', color: 0xc17a27, x: 7.65, y: CONFIG.map.catwalkY, z: 8.52, yaw: 0 },
+  { id: 'zweiterAtem', room: 'start', color: 0x8cc9e7, x: 6.42, y: 0, z: 3.7, yaw: -Math.PI / 2 },
+] as const;
+
+export const FOG_BANKS: readonly FogBankBlueprint[] = [
+  { id: 'fog-start-west', room: 'start', x: -5.9, y: 0, z: 3.8 },
+  { id: 'fog-start-east', room: 'start', x: 5.8, y: 0, z: -3.8 },
+  { id: 'fog-armory', room: 'armory', x: -13.8, y: 0, z: 10.2 },
+  { id: 'fog-generator', room: 'generator', x: 11.6, y: 0, z: 9.1 },
+  { id: 'fog-catwalk', room: 'catwalk', x: 3.1, y: CONFIG.map.catwalkY, z: 9.2 },
 ] as const;
 
 export const WINDOWS: readonly WindowBlueprint[] = [

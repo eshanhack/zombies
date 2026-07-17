@@ -1,5 +1,15 @@
-import { CONFIG, type RoomId, type WeaponId } from '../config.js';
-import { CRATE_LOCATIONS, DOORS, WALL_BUYS, WINDOWS, type WindowBlueprint } from '../map/blueprint.js';
+import { CONFIG, type PerkId, type PowerupId, type RoomId, type WeaponId } from '../config.js';
+import {
+  CRATE_LOCATIONS,
+  DOORS,
+  FOG_BANKS,
+  PERK_MACHINES,
+  POWER_SWITCH,
+  START_POSITIONS,
+  WALL_BUYS,
+  WINDOWS,
+  type WindowBlueprint,
+} from '../map/blueprint.js';
 import { NAV_NODE_BY_ID } from '../map/navgraph.js';
 import { coopZombieCount, soloZombieCount, spawnIntervalMs, zombieHealth } from './formulas.js';
 import { findNavPath, nearestNavNode } from './navigation.js';
@@ -13,13 +23,15 @@ import {
   type CombatPlayerState,
   type FireResult,
   type ReloadResult,
+  type RuntimeWeaponState,
 } from './combat.js';
 
 export type SimulationMode = 'solo' | 'coop';
 export type EnemySpeedTier = 'walk' | 'jog' | 'sprint';
-export type SimEnemyKind = 'zombie' | 'crawler';
+export type SimEnemyKind = 'zombie' | 'crawler' | 'wolf';
 export type SimEnemyState = 'spawn' | 'tear' | 'vault' | 'chase' | 'attack' | 'dead';
 export type RoundPhase = 'active' | 'intermission';
+export type RoundKind = 'zombies' | 'wolves';
 
 export interface SimPlayer {
   id: string;
@@ -34,6 +46,7 @@ export interface SimPlayer {
   connected: boolean;
   downed: boolean;
   invulnerableUntilMs: number;
+  spectating?: boolean;
 }
 
 export interface SimBarrier {
@@ -79,6 +92,30 @@ export interface SimGrenade {
   fuseRemainingMs: number;
 }
 
+export interface SimPowerup {
+  id: number;
+  type: PowerupId;
+  x: number;
+  y: number;
+  z: number;
+  remainingMs: number;
+  guaranteed: boolean;
+}
+
+export interface SimLifeState {
+  bleedoutRemainingMs: number;
+  selfReviveRemainingMs: number;
+  dead: boolean;
+  reconnectPending: boolean;
+  lastDamageAtMs: number;
+}
+
+export interface SimPowerupEffects {
+  instaKillRemainingMs: number;
+  doublePointsRemainingMs: number;
+  nukeRemainingMs: number;
+}
+
 export type CratePhase = 'closed' | 'spinning' | 'available';
 
 export interface SimCrateState {
@@ -93,11 +130,15 @@ export interface SimCrateState {
 }
 
 export type InteractionTarget =
+  | { kind: 'revive'; id: string; prompt: string; cost: 0 }
   | { kind: 'barrier'; id: string; prompt: string; cost: 0 }
   | { kind: 'door'; id: string; prompt: string; cost: number }
   | { kind: 'wallWeapon'; id: string; weaponId: WeaponId; prompt: string; cost: number }
   | { kind: 'grenades'; id: string; prompt: string; cost: number }
-  | { kind: 'crate'; id: string; prompt: string; cost: number };
+  | { kind: 'crate'; id: string; prompt: string; cost: number }
+  | { kind: 'power'; id: string; prompt: string; cost: 0 }
+  | { kind: 'perk'; id: PerkId; prompt: string; cost: number }
+  | { kind: 'inactive'; id: string; prompt: string; cost: 0 };
 
 export interface MeleeResult {
   accepted: boolean;
@@ -126,6 +167,16 @@ export type SimulationEvent =
   | { type: 'crateCollected'; locationId: string; playerId: string; weaponId: WeaponId }
   | { type: 'grenadeThrown'; grenadeId: number; playerId: string }
   | { type: 'grenadeExploded'; grenadeId: number; playerId: string; kills: number }
+  | { type: 'powerActivated'; playerId: string }
+  | { type: 'perkPurchaseStarted'; playerId: string; perkId: PerkId; cost: number }
+  | { type: 'perkGranted'; playerId: string; perkId: PerkId }
+  | { type: 'powerupSpawned'; powerupId: number; powerupType: PowerupId; guaranteed: boolean }
+  | { type: 'powerupCollected'; powerupId: number; powerupType: PowerupId; playerId: string }
+  | { type: 'playerDowned'; playerId: string; selfRevive: boolean }
+  | { type: 'playerRevived'; playerId: string; reviverId?: string }
+  | { type: 'playerBledOut'; playerId: string }
+  | { type: 'playerReturned'; playerId: string; reason: 'bleedout' | 'reconnect' }
+  | { type: 'gameOver' }
   | { type: 'roundStarted'; round: number; count: number }
   | { type: 'roundEnded'; round: number };
 
@@ -139,7 +190,9 @@ export class GameSimulation {
   readonly barriers = new Map<string, SimBarrier>();
   readonly enemies = new Map<number, SimEnemy>();
   readonly grenades = new Map<number, SimGrenade>();
+  readonly powerups = new Map<number, SimPowerup>();
   readonly openDoors = new Set<string>();
+  readonly effects: SimPowerupEffects = { instaKillRemainingMs: 0, doublePointsRemainingMs: 0, nukeRemainingMs: 0 };
   readonly crate: SimCrateState = {
     activeLocationId: CONFIG.mysteryCrate.startingLocationId,
     phase: 'closed',
@@ -154,7 +207,13 @@ export class GameSimulation {
   readonly mode: SimulationMode;
   readonly rosterSize: number;
   round = 1;
+  roundKind: RoundKind = 'zombies';
   phase: RoundPhase = 'active';
+  powerOn = false;
+  powerActivationElapsedMs = 0;
+  gameOver = false;
+  nextWolfRound = 0;
+  wolfAppearance = 0;
   spawnedThisRound = 0;
   totalThisRound = 0;
   queued = 0;
@@ -168,15 +227,21 @@ export class GameSimulation {
   private readonly repairByPlayer = new Map<string, { barrierId: string; progressMs: number }>();
   private readonly meleeReadyAt = new Map<string, number>();
   private readonly combatByPlayer = new Map<string, CombatPlayerState>();
+  private readonly lifeByPlayer = new Map<string, SimLifeState>();
+  private readonly savedDownInventory = new Map<string, { weapons: RuntimeWeaponState[]; activeWeaponIndex: number }>();
   private nextEnemyId = 1;
   private nextGrenadeId = 1;
+  private nextPowerupId = 1;
   private spawnInMs = 0;
+  private dropsThisRound = 0;
+  private wolfMaxAmmoSpawned = false;
 
   constructor(options: GameSimulationOptions) {
     this.seed = options.seed;
     this.mode = options.mode;
     this.rosterSize = Math.max(1, Math.min(CONFIG.coop.maxPlayers, options.rosterSize));
     this.rng = createRngStreams(options.seed);
+    this.nextWolfRound = this.rng.wolves.int(CONFIG.wolves.firstRoundMin, CONFIG.wolves.firstRoundMax);
     for (const window of WINDOWS) {
       this.barriers.set(window.id, { id: window.id, room: window.room, boards: CONFIG.barriers.boardSlots, repairProgressMs: 0 });
     }
@@ -186,12 +251,19 @@ export class GameSimulation {
   update(deltaMs: number, players: readonly SimPlayer[]): void {
     const delta = Math.min(Math.max(deltaMs, 0), CONFIG.simulation.maxFrameDeltaMs);
     this.elapsedMs += delta;
+    this.updatePowerActivation(delta);
+    this.updatePlayerLifecycle(delta, players);
     this.updateCombat(players);
     this.updateCrate(delta, players);
     this.updateGrenades(delta, players);
+    this.updatePowerups(delta, players);
+    if (this.gameOver) {
+      this.updateDead(delta);
+      return;
+    }
     if (this.phase === 'intermission') {
       this.intermissionRemainingMs = Math.max(0, this.intermissionRemainingMs - delta);
-      if (this.intermissionRemainingMs === 0) this.beginRound(this.round + 1);
+      if (this.intermissionRemainingMs === 0) this.beginRound(this.round + 1, players);
       this.updateRepair(delta, players);
       this.updateInteraction(delta, players);
       this.updateDead(delta);
@@ -232,14 +304,27 @@ export class GameSimulation {
     }
   }
 
-  getInteractionTarget(player: SimPlayer): InteractionTarget | null {
+  getInteractionTarget(player: SimPlayer, players: readonly SimPlayer[] = []): InteractionTarget | null {
     const barrier = this.nearestRepairableBarrier(player);
-    if (barrier !== null) return { kind: 'barrier', id: barrier.id, prompt: 'Hold F to rebuild barrier', cost: 0 };
     let nearest: { distance: number; target: InteractionTarget } | null = null;
     const consider = (distance: number, target: InteractionTarget): void => {
       if (distance > CONFIG.controller.interactionRangeM || (nearest !== null && distance >= nearest.distance)) return;
       nearest = { distance, target };
     };
+    for (const targetPlayer of players) {
+      if (targetPlayer.id === player.id || !targetPlayer.downed || targetPlayer.spectating === true) continue;
+      consider(Math.hypot(player.x - targetPlayer.x, player.y - targetPlayer.y, player.z - targetPlayer.z), {
+        kind: 'revive',
+        id: targetPlayer.id,
+        cost: 0,
+        prompt: 'Hold F to revive teammate',
+      });
+    }
+    if (barrier !== null) {
+      const window = WINDOWS.find((candidate) => candidate.id === barrier.id);
+      const distance = window === undefined ? 0 : Math.hypot(player.x - window.insideX, player.z - window.insideZ);
+      consider(distance, { kind: 'barrier', id: barrier.id, prompt: 'Hold F to rebuild barrier', cost: 0 });
+    }
     for (const door of DOORS) {
       if (this.openDoors.has(door.id)) continue;
       const centerX = (door.collider.minX + door.collider.maxX) * 0.5;
@@ -262,6 +347,32 @@ export class GameSimulation {
       const label = owned === undefined ? CONFIG.weapons[weaponId].name : `${CONFIG.weapons[weaponId].name} Ammo`;
       consider(distance, { kind: 'wallWeapon', id: wallBuy.id, weaponId, cost, prompt: `Hold F for ${label} [Cost: ${cost}]` });
     }
+    if (!this.powerOn && this.isRoomUnlocked(POWER_SWITCH.room)) {
+      const distance = Math.hypot(
+        player.x - POWER_SWITCH.x,
+        player.y + CONFIG.controller.eyeHeightM - POWER_SWITCH.y,
+        player.z - POWER_SWITCH.z,
+      );
+      consider(distance, { kind: 'power', id: POWER_SWITCH.id, cost: 0, prompt: 'Hold F to activate Power' });
+    }
+    for (const machine of PERK_MACHINES) {
+      if (!this.isRoomUnlocked(machine.room) || combat.perks.includes(machine.id) || combat.pendingPerk === machine.id) continue;
+      const distance = Math.hypot(player.x - machine.x, player.y - machine.y, player.z - machine.z);
+      const cost = machine.id === 'zweiterAtem' && this.mode === 'solo'
+        ? CONFIG.perks.zweiterAtem.costSolo
+        : CONFIG.perks[machine.id].cost;
+      if (!this.powerOn) {
+        consider(distance, { kind: 'inactive', id: machine.id, cost: 0, prompt: 'Power must be activated first' });
+      } else if (combat.perks.length < CONFIG.perkRuntime.maxOwned
+        && (machine.id !== 'zweiterAtem' || this.mode !== 'solo' || combat.selfRevivesRemaining > 0)) {
+        consider(distance, {
+          kind: 'perk',
+          id: machine.id,
+          cost,
+          prompt: `Hold F for ${CONFIG.perkRuntime.displayNames[machine.id]} [Cost: ${cost}]`,
+        });
+      }
+    }
     const crateLocation = CRATE_LOCATIONS.find((location) => location.id === this.crate.activeLocationId);
     if (crateLocation !== undefined && this.isRoomUnlocked(crateLocation.room) && this.crate.phase !== 'spinning') {
       const distance = Math.hypot(player.x - crateLocation.x, player.y - crateLocation.y, player.z - crateLocation.z);
@@ -281,7 +392,7 @@ export class GameSimulation {
 
   throwGrenade(player: SimPlayer, cookedMs: number): SimGrenade | null {
     const combat = this.getCombatState(player.id);
-    if (!player.connected || player.downed || combat.grenades <= 0) return null;
+    if (!player.connected || player.downed || player.spectating === true || combat.grenades <= 0 || this.elapsedMs < combat.actionLockedUntilMs) return null;
     combat.grenades -= 1;
     const cosPitch = Math.cos(player.pitch);
     const directionX = -Math.sin(player.yaw) * cosPitch;
@@ -313,6 +424,50 @@ export class GameSimulation {
     return state;
   }
 
+  getLifeState(playerId: string): SimLifeState {
+    let state = this.lifeByPlayer.get(playerId);
+    if (state === undefined) {
+      state = {
+        bleedoutRemainingMs: 0,
+        selfReviveRemainingMs: 0,
+        dead: false,
+        reconnectPending: false,
+        lastDamageAtMs: Number.NEGATIVE_INFINITY,
+      };
+      this.lifeByPlayer.set(playerId, state);
+    }
+    return state;
+  }
+
+  setPowerOn(powerOn: boolean): void {
+    this.powerOn = powerOn;
+    this.powerActivationElapsedMs = powerOn ? CONFIG.power.activationMs : 0;
+  }
+
+  grantPerk(player: SimPlayer, perkId: PerkId): void {
+    const combat = this.getCombatState(player.id);
+    if (!combat.perks.includes(perkId)) combat.perks.push(perkId);
+    if (perkId === 'eisenbrau') {
+      player.maxHp = CONFIG.perkRuntime.eisenbrauHp;
+      player.hp = player.maxHp;
+    }
+  }
+
+  markReconnectPending(player: SimPlayer): void {
+    const life = this.getLifeState(player.id);
+    life.reconnectPending = true;
+    player.spectating = true;
+    player.downed = false;
+  }
+
+  debugSpawnPowerup(type: PowerupId, x: number, y: number, z: number): SimPowerup {
+    return this.spawnPowerup(type, x, y, z, true);
+  }
+
+  applyPlayerDamage(player: SimPlayer, damage: number): void {
+    this.damagePlayerAmount(player, damage);
+  }
+
   grantWeapon(playerId: string, weaponId: WeaponId): CombatPlayerState {
     const state = this.getCombatState(playerId);
     const existingIndex = state.weapons.findIndex((weapon) => weapon.id === weaponId);
@@ -334,7 +489,7 @@ export class GameSimulation {
 
   switchWeapon(playerId: string, index: number): boolean {
     const state = this.getCombatState(playerId);
-    if (!Number.isInteger(index) || index < 0 || index >= state.weapons.length || index === state.activeWeaponIndex) return false;
+    if (this.elapsedMs < state.actionLockedUntilMs || !Number.isInteger(index) || index < 0 || index >= state.weapons.length || index === state.activeWeaponIndex) return false;
     state.activeWeaponIndex = index;
     this.cancelReload(state);
     state.switchReadyAtMs = this.elapsedMs + CONFIG.controller.weaponSwitchMs;
@@ -345,10 +500,11 @@ export class GameSimulation {
     const state = this.getCombatState(playerId);
     const weapon = activeWeapon(state);
     const definition = CONFIG.weapons[weapon.id];
-    const accepted = state.reloadingWeaponIndex < 0 && weapon.magazine < definition.magazine && weapon.reserve > 0;
+    const accepted = this.elapsedMs >= state.actionLockedUntilMs && state.reloadingWeaponIndex < 0 && weapon.magazine < definition.magazine && weapon.reserve > 0;
     if (accepted) {
       state.reloadingWeaponIndex = state.activeWeaponIndex;
-      state.reloadFinishAtMs = this.elapsedMs + definition.reloadMs;
+      const reloadMultiplier = state.perks.includes('schnellwasser') ? CONFIG.perkRuntime.schnellwasserReloadMultiplier : 1;
+      state.reloadFinishAtMs = this.elapsedMs + definition.reloadMs * reloadMultiplier;
     }
     return {
       accepted,
@@ -377,7 +533,7 @@ export class GameSimulation {
       damage: 0,
       points: 0,
     });
-    if (!player.connected || player.downed) return rejected('unavailable');
+    if (!player.connected || player.spectating === true || this.elapsedMs < state.actionLockedUntilMs) return rejected('unavailable');
     if (state.reloadingWeaponIndex >= 0) {
       if (definition.reloadStyle !== 'shell' || weapon.magazine <= 0) return rejected('reloading');
       this.cancelReload(state);
@@ -386,7 +542,8 @@ export class GameSimulation {
     if (weapon.magazine <= 0) return rejected('empty');
 
     weapon.magazine -= 1;
-    weapon.readyAtMs = this.elapsedMs + 60000 / definition.rpm;
+    const fireRateMultiplier = state.perks.includes('doppelschuss') ? CONFIG.perkRuntime.doppelschussFireRateMultiplier : 1;
+    weapon.readyAtMs = this.elapsedMs + 60000 / (definition.rpm * fireRateMultiplier);
     state.shots += 1;
     const origin = { x: player.x, y: player.y + CONFIG.controller.eyeHeightM, z: player.z };
     const damageMultiplier = weapon.upgraded ? CONFIG.forge.damageMultiplier : 1;
@@ -406,14 +563,14 @@ export class GameSimulation {
           / (CONFIG.combat.shotgunFalloffEndM - CONFIG.combat.shotgunFalloffStartM));
         falloff = lerp(1, CONFIG.combat.shotgunMinimumDamageMultiplier, alpha);
       }
-      const damage = definition.damage * (target.headshot ? definition.headMultiplier : 1) * damageMultiplier * falloff;
+      const damage = this.effects.instaKillRemainingMs > 0
+        ? target.enemy.hp
+        : definition.damage * (target.headshot ? definition.headMultiplier : 1) * damageMultiplier * falloff;
       target.enemy.hp = Math.max(0, target.enemy.hp - damage);
       target.enemy.crawlerUntouchedMs = 0;
       const killed = target.enemy.hp === 0;
       let points = CONFIG.points.bulletHit;
       if (killed) points += target.headshot ? CONFIG.points.killBonusHead : CONFIG.points.killBonusBody;
-      player.points += points;
-      state.pointsEarned += points;
       pelletHits += 1;
       totalDamage += damage;
       totalPoints += points;
@@ -427,6 +584,7 @@ export class GameSimulation {
       }
     }
     if (pelletHits > 0) state.hits += 1;
+    totalPoints = this.awardPoints(player, totalPoints, anyHeadshot ? 'headshot bullet' : 'body bullet', false);
     return {
       accepted: true,
       reason: 'fired',
@@ -445,7 +603,8 @@ export class GameSimulation {
 
   melee(player: SimPlayer): MeleeResult {
     const readyAt = this.meleeReadyAt.get(player.id) ?? 0;
-    if (this.elapsedMs < readyAt || player.downed || !player.connected) {
+    const combatState = this.getCombatState(player.id);
+    if (this.elapsedMs < readyAt || player.downed || !player.connected || player.spectating === true || this.elapsedMs < combatState.actionLockedUntilMs) {
       return { accepted: false, hit: false, killed: false, enemyId: null, damage: 0, points: 0 };
     }
     this.meleeReadyAt.set(player.id, this.elapsedMs + CONFIG.melee.cooldownMs);
@@ -467,15 +626,13 @@ export class GameSimulation {
     }
     if (target === null) return { accepted: true, hit: false, killed: false, enemyId: null, damage: 0, points: 0 };
     target.crawlerUntouchedMs = 0;
-    target.hp = Math.max(0, target.hp - CONFIG.melee.damage);
+    target.hp = Math.max(0, target.hp - (this.effects.instaKillRemainingMs > 0 ? target.hp : CONFIG.melee.damage));
     const killed = target.hp === 0;
     let points = 0;
     if (killed) {
       points = CONFIG.points.killMelee;
-      player.points += points;
-      const combat = this.getCombatState(player.id);
-      combat.pointsEarned += points;
-      combat.kills += 1;
+      points = this.awardPoints(player, points, 'melee kill', false);
+      combatState.kills += 1;
       this.killEnemy(target, 'melee', player.id);
     }
     return { accepted: true, hit: true, killed, enemyId: target.id, damage: CONFIG.melee.damage, points };
@@ -485,13 +642,15 @@ export class GameSimulation {
     const enemy = this.enemies.get(enemyId);
     if (enemy === undefined || enemy.state === 'dead') return false;
     enemy.crawlerUntouchedMs = 0;
-    if (lethal) {
+    if (lethal || this.effects.instaKillRemainingMs > 0) {
       this.killEnemy(enemy, 'explosive');
       return true;
     }
     enemy.hp = Math.max(1, enemy.hp - damage);
-    enemy.kind = 'crawler';
-    enemy.speed = CONFIG.zombie.crawlerSpeed;
+    if (enemy.kind !== 'wolf') {
+      enemy.kind = 'crawler';
+      enemy.speed = CONFIG.zombie.crawlerSpeed;
+    }
     return false;
   }
 
@@ -519,6 +678,11 @@ export class GameSimulation {
     this.update(0, players);
   }
 
+  debugStartRound(round: number, players: readonly SimPlayer[] = []): void {
+    this.enemies.clear();
+    this.beginRound(Math.max(1, Math.floor(round)), players);
+  }
+
   drainEvents(): SimulationEvent[] {
     return this.events.splice(0, this.events.length);
   }
@@ -529,25 +693,40 @@ export class GameSimulation {
     return alive;
   }
 
-  private beginRound(round: number): void {
+  private beginRound(round: number, players: readonly SimPlayer[] = []): void {
     this.round = round;
     this.phase = 'active';
+    this.returnPlayersAtRoundStart(players);
     this.spawnedThisRound = 0;
-    this.totalThisRound = this.mode === 'solo' ? soloZombieCount(round) : coopZombieCount(round, this.rosterSize);
+    this.roundKind = round === this.nextWolfRound ? 'wolves' : 'zombies';
+    if (this.roundKind === 'wolves') {
+      this.wolfAppearance += 1;
+      const perPlayer = this.wolfAppearance <= 2 ? CONFIG.wolves.firstTwoCountPerPlayer : CONFIG.wolves.laterCountPerPlayer;
+      this.totalThisRound = perPlayer * this.rosterSize;
+      this.nextWolfRound = round + this.rng.wolves.int(CONFIG.wolves.intervalMin, CONFIG.wolves.intervalMax);
+    } else {
+      this.totalThisRound = this.mode === 'solo' ? soloZombieCount(round) : coopZombieCount(round, this.rosterSize);
+    }
     this.queued = this.totalThisRound;
     this.spawnInMs = 0;
+    this.dropsThisRound = 0;
+    this.wolfMaxAmmoSpawned = false;
     this.events.push({ type: 'roundStarted', round, count: this.totalThisRound });
   }
 
   private updateSpawning(deltaMs: number, players: readonly SimPlayer[]): void {
     this.spawnInMs -= deltaMs;
-    if (this.spawnInMs > 0 || this.queued <= 0 || this.aliveCount >= CONFIG.zombie.maxAlive) return;
+    const activeCap = this.roundKind === 'wolves'
+      ? Math.min(CONFIG.zombie.maxAlive, CONFIG.wolves.maxActivePerPlayer * this.rosterSize)
+      : CONFIG.zombie.maxAlive;
+    if (this.spawnInMs > 0 || this.queued <= 0 || this.aliveCount >= activeCap) return;
     const spawned = this.spawnEnemy(players);
-    if (spawned !== null) this.spawnInMs = spawnIntervalMs(this.round);
+    if (spawned !== null) this.spawnInMs = this.roundKind === 'wolves' ? CONFIG.wolves.spawnIntervalMs : spawnIntervalMs(this.round);
   }
 
   private spawnEnemy(players: readonly SimPlayer[]): SimEnemy | null {
-    const activePlayers = players.filter((player) => player.connected && !player.downed);
+    if (this.roundKind === 'wolves') return this.spawnWolf(players);
+    const activePlayers = players.filter((player) => player.connected && !player.downed && player.spectating !== true);
     if (activePlayers.length === 0) return null;
     const candidates = WINDOWS.filter((window) => this.isRoomUnlocked(window.room));
     if (candidates.length === 0) return null;
@@ -591,9 +770,57 @@ export class GameSimulation {
     return enemy;
   }
 
+  private spawnWolf(players: readonly SimPlayer[]): SimEnemy | null {
+    const activePlayers = players.filter((player) => player.connected && !player.downed && player.spectating !== true);
+    if (activePlayers.length === 0) return null;
+    const banks = FOG_BANKS.filter((bank) => this.isRoomUnlocked(bank.room));
+    if (banks.length === 0) return null;
+    const weights = banks.map((bank) => {
+      const nearest = Math.min(...activePlayers.map((player) => Math.hypot(player.x - bank.x, player.z - bank.z)));
+      return 1 / (nearest + CONFIG.navigation.windowDistanceWeightOffsetM);
+    });
+    const bank = banks[this.rng.wolves.weightedIndex(weights)];
+    if (bank === undefined) return null;
+    const healthIndex = Math.min(Math.max(0, this.wolfAppearance - 1), CONFIG.wolves.healthByAppearance.length - 1);
+    const maxHp = CONFIG.wolves.healthByAppearance[healthIndex] ?? CONFIG.wolves.healthByAppearance[0];
+    const enemy: SimEnemy = {
+      id: this.nextEnemyId,
+      kind: 'wolf',
+      state: 'spawn',
+      speedTier: 'sprint',
+      x: bank.x,
+      y: bank.y,
+      z: bank.z,
+      yaw: 0,
+      hp: maxHp,
+      maxHp,
+      speed: CONFIG.wolves.speedMps,
+      barrierId: bank.id,
+      targetPlayerId: '',
+      path: [],
+      pathIndex: 0,
+      stateTimeMs: 0,
+      repathInMs: 0,
+      attackApplied: false,
+      crawlerUntouchedMs: 0,
+      spawnProgress: 0,
+      windowAttackInMs: 0,
+    };
+    this.nextEnemyId += 1;
+    this.enemies.set(enemy.id, enemy);
+    this.spawnedThisRound += 1;
+    this.queued = Math.max(0, this.totalThisRound - this.spawnedThisRound);
+    this.events.push({ type: 'enemySpawned', enemyId: enemy.id, barrierId: enemy.barrierId });
+    return enemy;
+  }
+
   private updateEnemy(enemy: SimEnemy, deltaMs: number, players: readonly SimPlayer[]): void {
     if (enemy.state === 'dead') return;
     enemy.stateTimeMs += deltaMs;
+    if (enemy.kind === 'wolf') {
+      this.updateWolf(enemy, deltaMs, players);
+      return;
+    }
     if (enemy.kind === 'crawler') {
       enemy.crawlerUntouchedMs += deltaMs;
       if (enemy.crawlerUntouchedMs >= CONFIG.combat.crawlerBleedoutMs) {
@@ -650,10 +877,44 @@ export class GameSimulation {
         enemy.attackApplied = true;
         this.damagePlayer(enemy, target);
       }
-      if (enemy.stateTimeMs >= CONFIG.zombie.attackCooldownMs) this.changeState(enemy, 'chase');
+      if (enemy.stateTimeMs >= CONFIG.zombie.attackCooldownMs) {
+        if (distanceToTarget <= CONFIG.zombie.attackRangeM) {
+          enemy.stateTimeMs -= CONFIG.zombie.attackCooldownMs;
+          enemy.attackApplied = false;
+        } else this.changeState(enemy, 'chase');
+      }
       return;
     }
     if (distanceToTarget <= CONFIG.zombie.attackRangeM) {
+      this.changeState(enemy, 'attack');
+      return;
+    }
+    this.chase(enemy, target, deltaMs);
+  }
+
+  private updateWolf(enemy: SimEnemy, deltaMs: number, players: readonly SimPlayer[]): void {
+    const target = this.nearestPlayer(enemy, players);
+    if (target !== null) enemy.targetPlayerId = target.id;
+    if (enemy.state === 'spawn') {
+      enemy.spawnProgress = Math.min(1, enemy.stateTimeMs / CONFIG.wolves.fogSpawnMs);
+      if (enemy.spawnProgress >= 1) this.changeState(enemy, 'chase');
+      return;
+    }
+    if (target === null) return;
+    if (enemy.state === 'attack') {
+      if (!enemy.attackApplied && enemy.stateTimeMs >= CONFIG.wolves.attackWindupMs) {
+        enemy.attackApplied = true;
+        this.damagePlayer(enemy, target, CONFIG.wolves.damage);
+      }
+      if (enemy.stateTimeMs >= CONFIG.wolves.attackCooldownMs) {
+        if (Math.hypot(target.x - enemy.x, target.y - enemy.y, target.z - enemy.z) <= CONFIG.zombie.attackRangeM) {
+          enemy.stateTimeMs -= CONFIG.wolves.attackCooldownMs;
+          enemy.attackApplied = false;
+        } else this.changeState(enemy, 'chase');
+      }
+      return;
+    }
+    if (Math.hypot(target.x - enemy.x, target.y - enemy.y, target.z - enemy.z) <= CONFIG.zombie.attackRangeM) {
       this.changeState(enemy, 'attack');
       return;
     }
@@ -697,13 +958,13 @@ export class GameSimulation {
 
   private updateInteraction(deltaMs: number, players: readonly SimPlayer[]): void {
     for (const playerId of this.interactionHeld) {
-      const player = players.find((candidate) => candidate.id === playerId && candidate.connected && !candidate.downed);
+      const player = players.find((candidate) => candidate.id === playerId && candidate.connected && !candidate.downed && candidate.spectating !== true);
       if (player === undefined) {
         this.interactionByPlayer.delete(playerId);
         continue;
       }
-      const target = this.getInteractionTarget(player);
-      if (target === null || target.kind === 'barrier') {
+      const target = this.getInteractionTarget(player, players);
+      if (target === null || target.kind === 'barrier' || target.kind === 'inactive') {
         this.interactionByPlayer.delete(playerId);
         continue;
       }
@@ -715,13 +976,38 @@ export class GameSimulation {
       }
       if (interaction.completed) continue;
       interaction.progressMs += deltaMs;
-      if (interaction.progressMs < CONFIG.controller.interactionHoldMs) continue;
+      const requiredMs = target.kind === 'revive'
+        ? CONFIG.coop.reviveMs * (this.getCombatState(player.id).perks.includes('zweiterAtem') ? CONFIG.coop.quickReviveMultiplier : 1)
+        : CONFIG.controller.interactionHoldMs;
+      if (interaction.progressMs < requiredMs) continue;
       interaction.completed = true;
-      this.executeInteraction(player, target);
+      this.executeInteraction(player, target, players);
     }
   }
 
-  private executeInteraction(player: SimPlayer, target: InteractionTarget): void {
+  private executeInteraction(player: SimPlayer, target: InteractionTarget, players: readonly SimPlayer[]): void {
+    if (target.kind === 'revive') {
+      const teammate = players.find((candidate) => candidate.id === target.id && candidate.downed);
+      if (teammate !== undefined) this.revivePlayer(teammate, player);
+      return;
+    }
+    if (target.kind === 'power') {
+      if (this.powerOn) return;
+      this.powerOn = true;
+      this.powerActivationElapsedMs = 0;
+      this.events.push({ type: 'powerActivated', playerId: player.id });
+      return;
+    }
+    if (target.kind === 'perk') {
+      const combat = this.getCombatState(player.id);
+      if (!this.powerOn || combat.perks.includes(target.id) || combat.pendingPerk !== ''
+        || combat.perks.length >= CONFIG.perkRuntime.maxOwned || !this.spendPoints(player, target.cost, 'perk purchase')) return;
+      combat.pendingPerk = target.id;
+      combat.actionLockedUntilMs = this.elapsedMs + CONFIG.perkRuntime.purchaseAnimationMs;
+      this.cancelReload(combat);
+      this.events.push({ type: 'perkPurchaseStarted', playerId: player.id, perkId: target.id, cost: target.cost });
+      return;
+    }
     if (target.kind === 'door') {
       const door = DOORS.find((candidate) => candidate.id === target.id);
       if (door === undefined || this.openDoors.has(door.id) || !this.spendPoints(player, door.cost, 'door purchase')) return;
@@ -789,7 +1075,7 @@ export class GameSimulation {
         const previousLocation = this.crate.activeLocationId;
         const purchaserId = this.crate.purchaserId;
         const purchaser = players.find((candidate) => candidate.id === purchaserId);
-        if (purchaser !== undefined) this.addPoints(purchaser, CONFIG.economy.mysteryCrate, 'Puppe refund', false);
+        if (purchaser !== undefined) this.awardPoints(purchaser, CONFIG.economy.mysteryCrate, 'Puppe refund', true, false);
         const relocatedTo = this.relocateCrate();
         this.events.push({ type: 'cratePuppe', locationId: previousLocation, playerId: purchaserId, relocatedTo });
         return;
@@ -869,21 +1155,23 @@ export class GameSimulation {
         ? 0
         : (distance - CONFIG.combat.grenadeKillRadiusM) / (CONFIG.combat.grenadeRadiusM - CONFIG.combat.grenadeKillRadiusM);
       const damage = CONFIG.combat.grenadeDamage * Math.max(0, 1 - alpha);
-      const canKill = distance <= CONFIG.combat.grenadeKillRadiusM;
-      if (canKill && damage >= enemy.hp) {
+      const canKill = this.effects.instaKillRemainingMs > 0 || distance <= CONFIG.combat.grenadeKillRadiusM;
+      if (canKill && (this.effects.instaKillRemainingMs > 0 || damage >= enemy.hp)) {
         kills += 1;
         this.killEnemy(enemy, 'explosive', grenade.ownerId);
         continue;
       }
       enemy.hp = Math.max(1, enemy.hp - damage);
-      enemy.kind = 'crawler';
-      enemy.speed = CONFIG.zombie.crawlerSpeed;
+      if (enemy.kind !== 'wolf') {
+        enemy.kind = 'crawler';
+        enemy.speed = CONFIG.zombie.crawlerSpeed;
+      }
       enemy.crawlerUntouchedMs = 0;
     }
     const owner = players.find((candidate) => candidate.id === grenade.ownerId);
     if (owner !== undefined && kills > 0) {
       const points = kills * CONFIG.points.killExplosive;
-      this.addPoints(owner, points, 'explosive kill');
+      this.awardPoints(owner, points, 'explosive kill');
       const combat = this.getCombatState(owner.id);
       combat.kills += kills;
     }
@@ -898,16 +1186,220 @@ export class GameSimulation {
     return true;
   }
 
-  private addPoints(player: SimPlayer, amount: number, reason: string, earned: boolean = true): void {
+  private awardPoints(player: SimPlayer, baseAmount: number, reason: string, emitTransaction: boolean = true, earned: boolean = true): number {
+    const amount = earned && this.effects.doublePointsRemainingMs > 0 ? baseAmount * 2 : baseAmount;
     player.points += amount;
     if (earned) this.getCombatState(player.id).pointsEarned += amount;
-    this.events.push({ type: 'pointTransaction', playerId: player.id, amount, reason });
+    if (emitTransaction) this.events.push({ type: 'pointTransaction', playerId: player.id, amount, reason });
+    return amount;
+  }
+
+  private updatePowerActivation(deltaMs: number): void {
+    if (!this.powerOn || this.powerActivationElapsedMs >= CONFIG.power.activationMs) return;
+    this.powerActivationElapsedMs = Math.min(CONFIG.power.activationMs, this.powerActivationElapsedMs + deltaMs);
+  }
+
+  private updatePlayerLifecycle(deltaMs: number, players: readonly SimPlayer[]): void {
+    for (const player of players) {
+      const life = this.getLifeState(player.id);
+      if (player.downed) {
+        if (this.mode === 'solo' && life.selfReviveRemainingMs > 0) {
+          life.selfReviveRemainingMs = Math.max(0, life.selfReviveRemainingMs - deltaMs);
+          if (life.selfReviveRemainingMs === 0) this.revivePlayer(player);
+        } else if (this.mode === 'coop') {
+          life.bleedoutRemainingMs = Math.max(0, life.bleedoutRemainingMs - deltaMs);
+          if (life.bleedoutRemainingMs === 0) {
+            player.downed = false;
+            player.spectating = true;
+            life.dead = true;
+            this.savedDownInventory.delete(player.id);
+            this.events.push({ type: 'playerBledOut', playerId: player.id });
+          }
+        }
+        continue;
+      }
+      if (life.dead || player.spectating === true || player.hp >= player.maxHp) continue;
+      if (this.elapsedMs - life.lastDamageAtMs < CONFIG.player.regenDelayMs) continue;
+      player.hp = Math.min(player.maxHp, player.hp + player.maxHp * deltaMs / CONFIG.player.regenDurationMs);
+    }
+
+    if (this.mode === 'coop' && !this.gameOver) {
+      const connected = players.filter((player) => player.connected);
+      if (connected.length > 0 && connected.every((player) => player.downed || this.getLifeState(player.id).dead)) {
+        this.gameOver = true;
+        this.events.push({ type: 'gameOver' });
+      }
+    }
+  }
+
+  private downPlayer(player: SimPlayer): void {
+    if (player.downed || player.spectating === true) return;
+    const combat = this.getCombatState(player.id);
+    const hadSoloRevive = this.mode === 'solo' && combat.perks.includes('zweiterAtem') && combat.selfRevivesRemaining > 0;
+    this.savedDownInventory.set(player.id, {
+      weapons: combat.weapons.map((weapon) => ({ ...weapon })),
+      activeWeaponIndex: combat.activeWeaponIndex,
+    });
+    combat.weapons.splice(0, combat.weapons.length, {
+      id: 'melder',
+      magazine: CONFIG.weapons.melder.magazine,
+      reserve: CONFIG.weapons.melder.reserve,
+      upgraded: false,
+      readyAtMs: this.elapsedMs,
+    });
+    combat.activeWeaponIndex = 0;
+    combat.perks.splice(0, combat.perks.length);
+    combat.pendingPerk = '';
+    combat.actionLockedUntilMs = 0;
+    this.cancelReload(combat);
+    player.maxHp = CONFIG.player.maxHp;
+    player.hp = 0;
+    player.downed = true;
+    const life = this.getLifeState(player.id);
+    life.lastDamageAtMs = this.elapsedMs;
+    life.bleedoutRemainingMs = this.mode === 'coop' ? CONFIG.coop.bleedoutMs : 0;
+    life.selfReviveRemainingMs = hadSoloRevive ? CONFIG.perkRuntime.soloSelfReviveMs : 0;
+    if (hadSoloRevive) combat.selfRevivesRemaining -= 1;
+    this.events.push({ type: 'playerDowned', playerId: player.id, selfRevive: hadSoloRevive });
+    if (this.mode === 'solo' && !hadSoloRevive) {
+      this.gameOver = true;
+      this.events.push({ type: 'gameOver' });
+    }
+  }
+
+  private revivePlayer(player: SimPlayer, reviver?: SimPlayer): void {
+    const life = this.getLifeState(player.id);
+    const combat = this.getCombatState(player.id);
+    const saved = this.savedDownInventory.get(player.id);
+    if (saved !== undefined) {
+      combat.weapons.splice(0, combat.weapons.length, ...saved.weapons.map((weapon) => ({ ...weapon })));
+      combat.activeWeaponIndex = Math.min(saved.activeWeaponIndex, combat.weapons.length - 1);
+      this.savedDownInventory.delete(player.id);
+    }
+    player.downed = false;
+    player.spectating = false;
+    player.maxHp = CONFIG.player.maxHp;
+    player.hp = CONFIG.player.maxHp;
+    player.invulnerableUntilMs = this.elapsedMs + CONFIG.player.postHitInvulnMs;
+    life.bleedoutRemainingMs = 0;
+    life.selfReviveRemainingMs = 0;
+    life.dead = false;
+    life.lastDamageAtMs = this.elapsedMs;
+    if (reviver !== undefined) this.awardPoints(reviver, CONFIG.coop.reviveAward, 'revive');
+    this.events.push({ type: 'playerRevived', playerId: player.id, ...(reviver === undefined ? {} : { reviverId: reviver.id }) });
+  }
+
+  private returnPlayersAtRoundStart(players: readonly SimPlayer[]): void {
+    players.forEach((player, index) => {
+      const life = this.getLifeState(player.id);
+      if (!life.dead && !life.reconnectPending) return;
+      const reason = life.dead ? 'bleedout' : 'reconnect';
+      const combat = this.getCombatState(player.id);
+      if (life.dead) {
+        combat.weapons.splice(0, combat.weapons.length, {
+          id: 'melder',
+          magazine: CONFIG.weapons.melder.magazine,
+          reserve: CONFIG.weapons.melder.reserve,
+          upgraded: false,
+          readyAtMs: this.elapsedMs,
+        });
+        combat.activeWeaponIndex = 0;
+        combat.perks.splice(0, combat.perks.length);
+        combat.pendingPerk = '';
+        combat.grenades = CONFIG.combat.maxGrenades;
+      }
+      if (player.connected) {
+        const spawn = START_POSITIONS[index % START_POSITIONS.length] ?? CONFIG.map.startPosition;
+        player.x = spawn.x;
+        player.y = spawn.y;
+        player.z = spawn.z;
+        player.spectating = false;
+        player.downed = false;
+        player.maxHp = combat.perks.includes('eisenbrau') ? CONFIG.perkRuntime.eisenbrauHp : CONFIG.player.maxHp;
+        player.hp = player.maxHp;
+        player.invulnerableUntilMs = this.elapsedMs + CONFIG.player.postHitInvulnMs;
+        life.dead = false;
+        life.reconnectPending = false;
+        life.bleedoutRemainingMs = 0;
+        life.selfReviveRemainingMs = 0;
+        this.events.push({ type: 'playerReturned', playerId: player.id, reason });
+      }
+    });
+  }
+
+  private updatePowerups(deltaMs: number, players: readonly SimPlayer[]): void {
+    this.effects.instaKillRemainingMs = Math.max(0, this.effects.instaKillRemainingMs - deltaMs);
+    this.effects.doublePointsRemainingMs = Math.max(0, this.effects.doublePointsRemainingMs - deltaMs);
+    if (this.effects.nukeRemainingMs > 0) {
+      this.effects.nukeRemainingMs = Math.max(0, this.effects.nukeRemainingMs - deltaMs);
+      if (this.effects.nukeRemainingMs === 0) {
+        for (const enemy of this.enemies.values()) {
+          if (enemy.state !== 'dead') this.killEnemy(enemy, 'explosive', undefined, false);
+        }
+      }
+    }
+    for (const powerup of [...this.powerups.values()]) {
+      powerup.remainingMs = Math.max(0, powerup.remainingMs - deltaMs);
+      if (powerup.remainingMs === 0) {
+        this.powerups.delete(powerup.id);
+        continue;
+      }
+      const collector = players.find((player) => player.connected && !player.downed && player.spectating !== true
+        && Math.hypot(player.x - powerup.x, player.y - powerup.y, player.z - powerup.z) <= CONFIG.powerups.pickupRadiusM);
+      if (collector === undefined) continue;
+      this.powerups.delete(powerup.id);
+      this.applyPowerup(powerup.type, collector, players);
+      this.events.push({ type: 'powerupCollected', powerupId: powerup.id, powerupType: powerup.type, playerId: collector.id });
+    }
+  }
+
+  private applyPowerup(type: PowerupId, collector: SimPlayer, players: readonly SimPlayer[]): void {
+    if (type === 'instaKill') this.effects.instaKillRemainingMs = CONFIG.powerups.instaKillMs;
+    if (type === 'doublePoints') this.effects.doublePointsRemainingMs = CONFIG.powerups.doublePointsMs;
+    if (type === 'nuke') {
+      this.effects.nukeRemainingMs = CONFIG.powerups.nukeDelayMs;
+      for (const player of players) this.awardPoints(player, CONFIG.points.nukeAward, 'nuke');
+    }
+    if (type === 'maxAmmo') {
+      for (const player of players) {
+        const combat = this.getCombatState(player.id);
+        for (const weapon of combat.weapons) weapon.reserve = CONFIG.weapons[weapon.id].reserve;
+        combat.grenades = CONFIG.combat.maxGrenades;
+      }
+    }
+    if (type === 'carpenter') {
+      for (const barrier of this.barriers.values()) barrier.boards = CONFIG.barriers.boardSlots;
+      for (const player of players) this.awardPoints(player, CONFIG.points.carpenterAward, 'carpenter');
+    }
+    void collector;
+  }
+
+  private spawnPowerup(type: PowerupId, x: number, y: number, z: number, guaranteed: boolean): SimPowerup {
+    const powerup: SimPowerup = {
+      id: this.nextPowerupId,
+      type,
+      x,
+      y,
+      z,
+      remainingMs: CONFIG.powerups.despawnMs,
+      guaranteed,
+    };
+    this.nextPowerupId += 1;
+    this.powerups.set(powerup.id, powerup);
+    this.events.push({ type: 'powerupSpawned', powerupId: powerup.id, powerupType: type, guaranteed });
+    return powerup;
+  }
+
+  private rollPowerupType(): PowerupId {
+    const types = Object.keys(CONFIG.powerups.weights) as PowerupId[];
+    const weights = types.map((type) => CONFIG.powerups.weights[type]);
+    return types[this.rng.drops.weightedIndex(weights)] ?? 'maxAmmo';
   }
 
   private updateRepair(deltaMs: number, players: readonly SimPlayer[]): void {
     for (const barrier of this.barriers.values()) barrier.repairProgressMs = 0;
     for (const playerId of this.repairHeld) {
-      const player = players.find((candidate) => candidate.id === playerId && candidate.connected && !candidate.downed);
+      const player = players.find((candidate) => candidate.id === playerId && candidate.connected && !candidate.downed && candidate.spectating !== true);
       if (player === undefined) {
         this.repairByPlayer.delete(playerId);
         continue;
@@ -926,9 +1418,8 @@ export class GameSimulation {
       while (repair.progressMs >= CONFIG.barriers.repairMs && barrier.boards < CONFIG.barriers.boardSlots) {
         repair.progressMs -= CONFIG.barriers.repairMs;
         barrier.boards += 1;
-        player.points += CONFIG.points.boardRepair;
-        this.getCombatState(player.id).pointsEarned += CONFIG.points.boardRepair;
-        this.events.push({ type: 'boardRepaired', barrierId: barrier.id, boards: barrier.boards, playerId: player.id, points: CONFIG.points.boardRepair });
+        const points = this.awardPoints(player, CONFIG.points.boardRepair, 'barrier repair', false);
+        this.events.push({ type: 'boardRepaired', barrierId: barrier.id, boards: barrier.boards, playerId: player.id, points });
       }
       if (barrier.boards >= CONFIG.barriers.boardSlots) {
         repair.progressMs = 0;
@@ -956,6 +1447,13 @@ export class GameSimulation {
   private updateCombat(players: readonly SimPlayer[]): void {
     for (const player of players) {
       const state = this.getCombatState(player.id);
+      if (state.pendingPerk !== '' && this.elapsedMs >= state.actionLockedUntilMs) {
+        const perkId = state.pendingPerk;
+        state.pendingPerk = '';
+        state.actionLockedUntilMs = 0;
+        this.grantPerk(player, perkId);
+        this.events.push({ type: 'perkGranted', playerId: player.id, perkId });
+      }
       if (state.reloadingWeaponIndex < 0 || this.elapsedMs < state.reloadFinishAtMs) continue;
       const weapon = state.weapons[state.reloadingWeaponIndex];
       if (weapon !== undefined) {
@@ -967,7 +1465,8 @@ export class GameSimulation {
         weapon.magazine += transfer;
         weapon.reserve -= transfer;
         if (definition.reloadStyle === 'shell' && weapon.magazine < capacity && weapon.reserve > 0) {
-          state.reloadFinishAtMs = this.elapsedMs + definition.reloadMs;
+          const reloadMultiplier = state.perks.includes('schnellwasser') ? CONFIG.perkRuntime.schnellwasserReloadMultiplier : 1;
+          state.reloadFinishAtMs = this.elapsedMs + definition.reloadMs * reloadMultiplier;
           continue;
         }
       }
@@ -1026,7 +1525,7 @@ export class GameSimulation {
     let nearest: SimPlayer | null = null;
     let distance = Number.POSITIVE_INFINITY;
     for (const player of players) {
-      if (!player.connected || player.downed) continue;
+      if (!player.connected || player.downed || player.spectating === true) continue;
       const candidate = Math.hypot(player.x - enemy.x, player.y - enemy.y, player.z - enemy.z);
       if (candidate >= distance) continue;
       nearest = player;
@@ -1035,18 +1534,38 @@ export class GameSimulation {
     return nearest;
   }
 
-  private damagePlayer(enemy: SimEnemy, player: SimPlayer): void {
-    if (this.elapsedMs < player.invulnerableUntilMs || player.downed) return;
-    player.hp = Math.max(0, player.hp - CONFIG.zombie.hitDamage);
-    player.invulnerableUntilMs = this.elapsedMs + CONFIG.player.postHitInvulnMs;
-    if (player.hp === 0) player.downed = true;
-    this.events.push({ type: 'playerDamaged', playerId: player.id, enemyId: enemy.id, damage: CONFIG.zombie.hitDamage });
+  private damagePlayer(enemy: SimEnemy, player: SimPlayer, amount: number = CONFIG.zombie.hitDamage): void {
+    if (!this.damagePlayerAmount(player, amount)) return;
+    this.events.push({ type: 'playerDamaged', playerId: player.id, enemyId: enemy.id, damage: amount });
   }
 
-  private killEnemy(enemy: SimEnemy, method: 'melee' | 'explosive' | 'debug' | 'bullet', playerId?: string): void {
+  private damagePlayerAmount(player: SimPlayer, amount: number): boolean {
+    if (this.elapsedMs < player.invulnerableUntilMs || player.downed || player.spectating === true) return false;
+    player.hp = Math.max(0, player.hp - Math.max(0, amount));
+    player.invulnerableUntilMs = this.elapsedMs + CONFIG.player.postHitInvulnMs;
+    this.getLifeState(player.id).lastDamageAtMs = this.elapsedMs;
+    if (player.hp === 0) this.downPlayer(player);
+    return true;
+  }
+
+  private killEnemy(
+    enemy: SimEnemy,
+    method: 'melee' | 'explosive' | 'debug' | 'bullet',
+    playerId?: string,
+    allowDrop: boolean = true,
+  ): void {
     enemy.hp = 0;
     this.changeState(enemy, 'dead');
     this.events.push({ type: 'enemyKilled', enemyId: enemy.id, playerId, method });
+    if (allowDrop && method !== 'debug' && this.dropsThisRound < CONFIG.powerups.maxDropsPerRound
+      && this.rng.drops.next() < CONFIG.powerups.dropChancePerKill) {
+      this.dropsThisRound += 1;
+      this.spawnPowerup(this.rollPowerupType(), enemy.x, enemy.y + CONFIG.powerups.spawnHeightM, enemy.z, false);
+    }
+    if (enemy.kind === 'wolf' && this.roundKind === 'wolves' && this.queued === 0 && this.aliveCount === 0 && !this.wolfMaxAmmoSpawned) {
+      this.wolfMaxAmmoSpawned = true;
+      this.spawnPowerup('maxAmmo', enemy.x, enemy.y + CONFIG.powerups.spawnHeightM, enemy.z, true);
+    }
   }
 
   private changeState(enemy: SimEnemy, state: SimEnemyState): void {

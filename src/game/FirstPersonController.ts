@@ -62,6 +62,7 @@ export class FirstPersonController {
   private noclip = false;
   private sequence = 0;
   private fixedTick = 0;
+  private movementEnabled = true;
   private disposed = false;
 
   constructor(options: ControllerOptions) {
@@ -114,6 +115,14 @@ export class FirstPersonController {
   applyRecoil(vertical: number, horizontal: number): void {
     this.recoilPitch = THREE.MathUtils.clamp(this.recoilPitch + vertical, -CONFIG.controller.pitchLimitRad, CONFIG.controller.pitchLimitRad);
     this.recoilYaw += horizontal;
+  }
+
+  setMovementEnabled(enabled: boolean): void {
+    this.movementEnabled = enabled;
+    if (enabled) return;
+    this.sprinting = false;
+    this.state.vx = 0;
+    this.state.vz = 0;
   }
 
   reconcile(authoritative: AuthoritativePlayerState): void {
@@ -199,14 +208,14 @@ export class FirstPersonController {
     if (this.fixedTick % (CONFIG.simulation.hz / CONFIG.coop.inputHz) === 0) this.sequence += 1;
     return sanitizeMovementInput({
       sequence: this.sequence,
-      forward: Number(this.pressed.has('KeyW')) - Number(this.pressed.has('KeyS')),
-      right: Number(this.pressed.has('KeyD')) - Number(this.pressed.has('KeyA')),
+      forward: this.movementEnabled ? Number(this.pressed.has('KeyW')) - Number(this.pressed.has('KeyS')) : 0,
+      right: this.movementEnabled ? Number(this.pressed.has('KeyD')) - Number(this.pressed.has('KeyA')) : 0,
       yaw: this.yaw + this.recoilYaw,
       pitch: THREE.MathUtils.clamp(this.pitch + this.recoilPitch, -CONFIG.controller.pitchLimitRad, CONFIG.controller.pitchLimitRad),
-      sprint: this.pressed.has('ShiftLeft') || this.pressed.has('ShiftRight'),
+      sprint: this.movementEnabled && (this.pressed.has('ShiftLeft') || this.pressed.has('ShiftRight')),
       ads: this.ads,
-      ascend: this.pressed.has('Space'),
-      descend: this.pressed.has('ControlLeft') || this.pressed.has('ControlRight'),
+      ascend: this.movementEnabled && this.pressed.has('Space'),
+      descend: this.movementEnabled && (this.pressed.has('ControlLeft') || this.pressed.has('ControlRight')),
     });
   }
 

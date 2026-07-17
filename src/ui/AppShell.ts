@@ -3,7 +3,7 @@ import type { GameSnapshot } from '../shared/types';
 import type { PreludeScene } from '../game/PreludeScene';
 import type { LobbyView } from '../network/CoopClient';
 
-type MenuAction = 'solo' | 'create' | 'join' | 'settings' | 'records';
+type MenuAction = 'solo' | 'create' | 'join' | 'resume' | 'settings' | 'records';
 
 export interface AppShellHandlers {
   onAction(action: MenuAction): void;
@@ -34,6 +34,10 @@ export class AppShell {
   private readonly grenadeValue: HTMLElement;
   private readonly reserveValue: HTMLElement;
   private readonly reloadStatus: HTMLElement;
+  private readonly perkRow: HTMLElement;
+  private readonly effectRow: HTMLElement;
+  private readonly lifeOverlay: HTMLElement;
+  private readonly powerStatus: HTMLElement;
   private readonly roundCanvas: HTMLCanvasElement;
   private readonly lockPrompt: HTMLButtonElement;
   private readonly controllerValue: HTMLElement;
@@ -41,7 +45,7 @@ export class AppShell {
   private snapshotProvider: () => GameSnapshot | null = () => null;
   private displayedRound = -1;
 
-  constructor(seed: number, scene: PreludeScene, handlers: AppShellHandlers) {
+  constructor(seed: number, scene: PreludeScene, handlers: AppShellHandlers, resumeAvailable = false) {
     this.handlers = handlers;
     this.root = document.createElement('main');
     this.root.className = 'app-shell';
@@ -55,6 +59,7 @@ export class AppShell {
         <p class="tagline">The dead remember every door you opened.</p>
         <nav class="menu-actions" aria-label="Main menu">
           <button type="button" data-action="solo"><span>Solo</span><small>Begin a local run</small></button>
+          ${resumeAvailable ? '<button type="button" data-action="resume"><span>Resume Co-op</span><small>Return to your locked roster</small></button>' : ''}
           <button type="button" data-action="create"><span>Create Co-op</span><small>Private room · up to four</small></button>
           <button type="button" data-action="join"><span>Join Co-op</span><small>Enter an invite code</small></button>
           <button type="button" data-action="settings"><span>Settings</span></button>
@@ -68,12 +73,13 @@ export class AppShell {
         <div><span>WEATHER</span><strong>FOG / −6°C</strong></div>
       </aside>
     `;
+    this.powerStatus = this.root.querySelector('.status-rail strong') as HTMLElement;
 
     this.overlay = document.createElement('section');
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P4 ARSENAL / ECONOMY</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P5 POWER / LIFE / WOLVES</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -86,6 +92,9 @@ export class AppShell {
         <div><dt>Barrier boards</dt><dd data-debug="barriers">0 / 0</dd></div>
         <div><dt>Enemy states</dt><dd data-debug="enemy-states">none</dd></div>
         <div><dt>Doors / crate / grenades</dt><dd data-debug="economy">0 · closed · 4</dd></div>
+        <div><dt>Power / perks / effects</dt><dd data-debug="systems">OFF · 0 · none</dd></div>
+        <div><dt>Round species</dt><dd data-debug="species">zombies</dd></div>
+        <div><dt>Console errors</dt><dd data-debug="errors">0</dd></div>
         <div><dt>Controller</dt><dd data-debug="controller">menu</dd></div>
       </dl>
       <div class="debug-actions">
@@ -100,6 +109,10 @@ export class AppShell {
         <button data-debug-action="jager">Grant Jäger K-8</button>
         <button data-debug-action="arsenal">Cycle conventional weapon</button>
         <button data-debug-action="target">Spawn aim target</button>
+        <button data-debug-action="power">Activate power</button>
+        <button data-debug-action="perk">Cycle perk</button>
+        <button data-debug-action="powerup">Cycle power-up</button>
+        <button data-debug-action="wolves">Start wolf round</button>
       </div>
     `;
     this.metricValue = this.overlay.querySelector('[data-debug="metrics"]') as HTMLElement;
@@ -120,6 +133,9 @@ export class AppShell {
       <div class="stamina-meter" aria-label="Sprint stamina"><span></span></div>
       <div class="round-hud" aria-label="Current round"><canvas width="180" height="96"></canvas></div>
       <div class="points-hud"><div class="point-ledger" aria-live="polite"></div><strong>500</strong></div>
+      <div class="perk-row" aria-label="Owned perks"></div>
+      <div class="effect-row" aria-live="polite"></div>
+      <div class="life-state-overlay is-hidden" aria-live="assertive"></div>
       <div class="weapon-hud"><span class="weapon-name">Melder</span><div><strong class="ammo-value">8</strong><i>/</i><b>32</b></div><small class="reload-status"></small><em>◆ × 4</em></div>
     `;
     this.stamina = this.hud.querySelector('.stamina-meter') as HTMLElement;
@@ -133,6 +149,9 @@ export class AppShell {
     this.grenadeValue = this.hud.querySelector('.weapon-hud em') as HTMLElement;
     this.reserveValue = this.hud.querySelector('.weapon-hud b') as HTMLElement;
     this.reloadStatus = this.hud.querySelector('.reload-status') as HTMLElement;
+    this.perkRow = this.hud.querySelector('.perk-row') as HTMLElement;
+    this.effectRow = this.hud.querySelector('.effect-row') as HTMLElement;
+    this.lifeOverlay = this.hud.querySelector('.life-state-overlay') as HTMLElement;
     this.roundCanvas = this.hud.querySelector('.round-hud canvas') as HTMLCanvasElement;
     this.drawRound(0, false);
     this.root.append(this.hud);
@@ -232,6 +251,18 @@ export class AppShell {
         const weapon = combat?.weapons[combat.activeWeaponIndex];
         const economy = this.overlay.querySelector<HTMLElement>('[data-debug="economy"]');
         if (economy !== null && combat !== null) economy.textContent = `${combat.openDoors.length} · ${combat.crate.phase} @ ${combat.crate.activeLocationId} · ${combat.grenades}`;
+        const systems = this.overlay.querySelector<HTMLElement>('[data-debug="systems"]');
+        if (systems !== null && combat !== null) {
+          const activeEffects = [
+            combat.instaKillRemainingMs > 0 ? `IK ${(combat.instaKillRemainingMs / 1000).toFixed(1)}` : '',
+            combat.doublePointsRemainingMs > 0 ? `2X ${(combat.doublePointsRemainingMs / 1000).toFixed(1)}` : '',
+          ].filter(Boolean).join(' / ') || 'none';
+          systems.textContent = `${combat.powerOn ? 'ON' : 'OFF'} · ${combat.perks.length} · ${activeEffects}`;
+        }
+        const species = this.overlay.querySelector<HTMLElement>('[data-debug="species"]');
+        if (species !== null && combat !== null) species.textContent = `${combat.roundKind} · next wolves ${combat.nextWolfRound}`;
+        const errors = this.overlay.querySelector<HTMLElement>('[data-debug="errors"]');
+        if (errors !== null) errors.textContent = String(window.__consoleErrors.length);
         this.pointsValue.textContent = String(combat?.points ?? snapshot.players[0]?.points ?? 0);
         if (weapon !== undefined) {
           this.weaponName.textContent = `${weapon.upgraded ? 'Über-' : ''}${CONFIG.weapons[weapon.id].name}`;
@@ -241,6 +272,26 @@ export class AppShell {
         }
         this.grenadeValue.textContent = `◆ × ${combat?.grenades ?? CONFIG.combat.maxGrenades}`;
         this.hud.classList.toggle('is-low-health', (combat?.hp ?? CONFIG.player.maxHp) < CONFIG.player.maxHp * 0.3);
+        this.powerStatus.textContent = combat?.powerOn ? 'ONLINE' : 'OFFLINE';
+        this.powerStatus.classList.toggle('status-off', !combat?.powerOn);
+        const perkMarkup = (combat?.perks ?? []).map((perk) => {
+          const short = perk === 'eisenbrau' ? 'EI' : perk === 'schnellwasser' ? 'SW' : perk === 'doppelschuss' ? 'DS' : 'ZA';
+          return `<i data-perk="${perk}" title="${CONFIG.perkRuntime.displayNames[perk]}">${short}</i>`;
+        }).join('');
+        if (this.perkRow.innerHTML !== perkMarkup) this.perkRow.innerHTML = perkMarkup;
+        const effectMarkup = combat === null || combat === undefined ? '' : [
+          combat.instaKillRemainingMs > 0 ? `<b>INSTA-KILL <span>${Math.ceil(combat.instaKillRemainingMs / 1000)}</span></b>` : '',
+          combat.doublePointsRemainingMs > 0 ? `<b>DOUBLE POINTS <span>${Math.ceil(combat.doublePointsRemainingMs / 1000)}</span></b>` : '',
+        ].filter(Boolean).join('');
+        if (this.effectRow.innerHTML !== effectMarkup) this.effectRow.innerHTML = effectMarkup;
+        let lifeMessage = '';
+        if (combat?.gameOver) lifeMessage = 'GAME OVER';
+        else if (combat?.downed && combat.selfReviveRemainingMs > 0) lifeMessage = `ZWEITER ATEM · ${Math.ceil(combat.selfReviveRemainingMs / 1000)}`;
+        else if (combat?.downed) lifeMessage = `DOWNED · BLEEDOUT ${Math.ceil(combat.bleedoutRemainingMs / 1000)}`;
+        else if (combat?.reconnectPending) lifeMessage = 'SPECTATING · RETURNING NEXT ROUND';
+        else if (combat?.spectating) lifeMessage = 'SPECTATING';
+        this.lifeOverlay.textContent = lifeMessage;
+        this.lifeOverlay.classList.toggle('is-hidden', lifeMessage === '');
       }
       for (const event of scene.drainHudEvents()) this.renderHudEvent(event);
       const controller = scene.getControllerReadout();

@@ -1,4 +1,4 @@
-import { CONFIG, type WeaponId } from '../config.js';
+import { CONFIG, type PerkId, type WeaponId } from '../config.js';
 import type { SeededRng } from './rng.js';
 
 export interface RuntimeWeaponState {
@@ -23,6 +23,10 @@ export interface CombatPlayerState {
   doorsOpened: number;
   crateRolls: number;
   grenades: number;
+  perks: PerkId[];
+  pendingPerk: PerkId | '';
+  actionLockedUntilMs: number;
+  selfRevivesRemaining: number;
 }
 
 export interface FireResult {
@@ -75,6 +79,10 @@ export function createCombatPlayerState(): CombatPlayerState {
     doorsOpened: 0,
     crateRolls: 0,
     grenades: CONFIG.combat.maxGrenades,
+    perks: [],
+    pendingPerk: '',
+    actionLockedUntilMs: 0,
+    selfRevivesRemaining: CONFIG.perkRuntime.soloSelfReviveStock,
   };
 }
 

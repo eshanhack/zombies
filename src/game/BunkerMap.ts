@@ -1,6 +1,16 @@
 import * as THREE from 'three';
-import { CONFIG } from '../config.js';
-import { CRATE_LOCATIONS, DOORS, FLOOR_ZONES, STATIC_COLLIDERS, WALL_BUYS, WINDOWS, type AabbCollider } from '../map/blueprint.js';
+import { CONFIG, type PerkId, type PowerupId } from '../config.js';
+import {
+  CRATE_LOCATIONS,
+  DOORS,
+  FLOOR_ZONES,
+  PERK_MACHINES,
+  POWER_SWITCH,
+  STATIC_COLLIDERS,
+  WALL_BUYS,
+  WINDOWS,
+  type AabbCollider,
+} from '../map/blueprint.js';
 import { NAV_NODES, NAV_NODE_BY_ID } from '../map/navgraph.js';
 import type { CollisionWorld } from '../shared/movement.js';
 
@@ -11,6 +21,9 @@ export class BunkerMap {
   private readonly doorMeshes = new Map<string, THREE.Mesh>();
   private readonly navDebug = new THREE.Group();
   private readonly crateVisuals = new Map<string, { group: THREE.Group; lid: THREE.Mesh; shaft: THREE.Mesh; weapon: THREE.Mesh }>();
+  private readonly perkVisuals = new Map<PerkId, { material: THREE.MeshStandardMaterial; light: THREE.PointLight; sign: THREE.MeshStandardMaterial }>();
+  private readonly powerupVisuals: { group: THREE.Group; core: THREE.MeshStandardMaterial; ring: THREE.MeshStandardMaterial; light: THREE.PointLight }[] = [];
+  private powerLever: THREE.Mesh | null = null;
   private boardInstances: THREE.InstancedMesh | null = null;
   private grenadeInstances: THREE.InstancedMesh | null = null;
 
@@ -104,6 +117,56 @@ export class BunkerMap {
     }
     instances.count = count;
     instances.instanceMatrix.needsUpdate = true;
+  }
+
+  updatePower(powerOn: boolean, activationElapsedMs: number): void {
+    const progress = powerOn ? Math.min(1, activationElapsedMs / CONFIG.power.activationMs) : 0;
+    if (this.powerLever !== null) {
+      this.powerLever.rotation.x = THREE.MathUtils.lerp(
+        CONFIG.rendering.powerVisual.offAngleRad,
+        CONFIG.rendering.powerVisual.onAngleRad,
+        powerOn ? 1 : 0,
+      );
+    }
+    for (const [perkId, visual] of this.perkVisuals) {
+      const machineIndex = PERK_MACHINES.findIndex((machine) => machine.id === perkId);
+      const roomDelay = CONFIG.power.roomSurgeDelayMs[Math.max(0, machineIndex)] ?? 0;
+      const live = powerOn && activationElapsedMs >= roomDelay;
+      const surge = live && progress < 1 ? 0.65 + Math.sin(activationElapsedMs * 0.035 + machineIndex) * 0.35 : 1;
+      visual.material.emissiveIntensity = live ? CONFIG.rendering.perkVisual.poweredEmissive * surge : CONFIG.rendering.perkVisual.unpoweredEmissive;
+      visual.sign.emissiveIntensity = live ? CONFIG.rendering.perkVisual.poweredEmissive * 1.35 * surge : 0;
+      visual.light.intensity = live ? CONFIG.rendering.powerVisual.surgeIntensity * surge : 0;
+    }
+  }
+
+  updatePowerups(
+    powerups: readonly { powerupType: PowerupId; x: number; y: number; z: number; remainingMs: number }[],
+    elapsedMs: number,
+  ): void {
+    for (let index = 0; index < this.powerupVisuals.length; index += 1) {
+      const visual = this.powerupVisuals[index]!;
+      const powerup = powerups[index];
+      visual.group.visible = powerup !== undefined;
+      if (powerup === undefined) continue;
+      const ageMs = CONFIG.powerups.despawnMs - powerup.remainingMs;
+      const slowBlink = ageMs >= CONFIG.powerups.blinkAtMs[0];
+      const fastBlink = ageMs >= CONFIG.powerups.blinkAtMs[1];
+      const blinkHz = fastBlink ? 8 : slowBlink ? 3 : 0;
+      const shown = blinkHz === 0 || Math.sin(elapsedMs / 1000 * Math.PI * 2 * blinkHz) > -0.25;
+      visual.group.visible = shown;
+      const color = CONFIG.rendering.powerupVisual.colors[powerup.powerupType];
+      visual.core.color.setHex(color);
+      visual.core.emissive.setHex(color);
+      visual.ring.color.setHex(color);
+      visual.ring.emissive.setHex(color);
+      visual.light.color.setHex(color);
+      visual.group.position.set(
+        powerup.x,
+        powerup.y + Math.sin(elapsedMs * 0.0017 + index) * CONFIG.powerups.visualHoverM,
+        powerup.z,
+      );
+      visual.group.rotation.y = elapsedMs / 1000 * CONFIG.powerups.visualSpinRadPerSecond;
+    }
   }
 
   dispose(): void {
@@ -313,6 +376,94 @@ export class BunkerMap {
     this.grenadeInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
     this.grenadeInstances.castShadow = true;
     this.group.add(this.grenadeInstances);
+
+    this.buildPowerAndPerks(steel);
+    this.buildPowerupPool();
+  }
+
+  private buildPowerAndPerks(steel: THREE.Material): void {
+    const machineVisual = CONFIG.rendering.perkVisual;
+    for (const machine of PERK_MACHINES) {
+      const group = new THREE.Group();
+      group.position.set(machine.x, machine.y, machine.z);
+      group.rotation.y = machine.yaw;
+      const material = new THREE.MeshStandardMaterial({
+        color: machine.color,
+        emissive: machine.color,
+        emissiveIntensity: machineVisual.unpoweredEmissive,
+        roughness: 0.48,
+        metalness: 0.52,
+      });
+      const body = new THREE.Mesh(
+        new THREE.BoxGeometry(machineVisual.bodyWidthM, machineVisual.bodyHeightM, machineVisual.bodyDepthM),
+        material,
+      );
+      body.position.y = machineVisual.bodyHeightM * 0.5;
+      body.castShadow = true;
+      group.add(body);
+      const crown = new THREE.Mesh(
+        new THREE.CylinderGeometry(machineVisual.bodyWidthM * 0.42, machineVisual.bodyWidthM * 0.52, machineVisual.signHeightM, 8),
+        material,
+      );
+      crown.position.y = machineVisual.bodyHeightM + machineVisual.signHeightM * 0.35;
+      group.add(crown);
+      const signMaterial = new THREE.MeshStandardMaterial({
+        color: machine.color,
+        emissive: machine.color,
+        emissiveIntensity: 0,
+        roughness: 0.34,
+        metalness: 0.15,
+      });
+      const sign = new THREE.Mesh(new THREE.PlaneGeometry(machineVisual.bodyWidthM * 0.72, machineVisual.bodyHeightM * 0.34), signMaterial);
+      sign.position.set(0, machineVisual.bodyHeightM * 0.61, -machineVisual.bodyDepthM * 0.505);
+      sign.rotation.y = Math.PI;
+      group.add(sign);
+      const dispenser = new THREE.Mesh(new THREE.BoxGeometry(machineVisual.bodyWidthM * 0.48, 0.22, 0.12), steel);
+      dispenser.position.set(0, machineVisual.bodyHeightM * 0.25, -machineVisual.bodyDepthM * 0.58);
+      group.add(dispenser);
+      const light = new THREE.PointLight(machine.color, 0, 3.2, 2);
+      light.position.set(0, machineVisual.bodyHeightM * 0.68, -0.48);
+      group.add(light);
+      this.perkVisuals.set(machine.id, { material, light, sign: signMaterial });
+      this.group.add(group);
+    }
+
+    const breaker = new THREE.Group();
+    breaker.position.set(POWER_SWITCH.x, POWER_SWITCH.y, POWER_SWITCH.z);
+    breaker.rotation.y = POWER_SWITCH.yaw;
+    const panel = new THREE.Mesh(new THREE.BoxGeometry(0.72, 1.08, 0.2), steel);
+    panel.castShadow = true;
+    breaker.add(panel);
+    this.powerLever = new THREE.Mesh(new THREE.BoxGeometry(0.12, CONFIG.rendering.powerVisual.leverLengthM, 0.12), steel);
+    this.powerLever.geometry.translate(0, -CONFIG.rendering.powerVisual.leverLengthM * 0.42, 0);
+    this.powerLever.position.set(0, 0.22, -0.2);
+    this.powerLever.rotation.x = CONFIG.rendering.powerVisual.offAngleRad;
+    breaker.add(this.powerLever);
+    this.group.add(breaker);
+  }
+
+  private buildPowerupPool(): void {
+    const visual = CONFIG.rendering.powerupVisual;
+    const capacity = CONFIG.powerups.maxDropsPerRound + 1;
+    for (let index = 0; index < capacity; index += 1) {
+      const group = new THREE.Group();
+      const coreMaterial = new THREE.MeshStandardMaterial({
+        color: visual.colors.maxAmmo,
+        emissive: visual.colors.maxAmmo,
+        emissiveIntensity: visual.glowIntensity,
+        roughness: 0.28,
+      });
+      const ringMaterial = coreMaterial.clone();
+      const core = new THREE.Mesh(new THREE.IcosahedronGeometry(visual.radiusM, 1), coreMaterial);
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(visual.ringRadiusM, 0.035, 6, 16), ringMaterial);
+      ring.rotation.x = Math.PI / 2;
+      group.add(core, ring);
+      const light = new THREE.PointLight(visual.colors.maxAmmo, visual.glowIntensity, visual.lightDistanceM, 2);
+      group.add(light);
+      group.visible = false;
+      this.powerupVisuals.push({ group, core: coreMaterial, ring: ringMaterial, light });
+      this.group.add(group);
+    }
   }
 
   private buildLighting(): void {

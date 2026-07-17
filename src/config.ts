@@ -88,6 +88,40 @@ export const CONFIG = {
     blinkAtMs: [20000, 25000],
     instaKillMs: 30000,
     doublePointsMs: 30000,
+    pickupRadiusM: 1.15,
+    nukeDelayMs: 500,
+    visualSpinRadPerSecond: 1.9,
+    visualHoverM: 0.16,
+    spawnHeightM: 0.55,
+    weights: {
+      instaKill: 20,
+      doublePoints: 20,
+      nuke: 20,
+      maxAmmo: 20,
+      carpenter: 20,
+    },
+  },
+
+  power: {
+    activationMs: 3000,
+    roomSurgeDelayMs: [0, 550, 1100, 1650],
+    leverThrowMs: 650,
+  },
+
+  perkRuntime: {
+    purchaseAnimationMs: 3000,
+    maxOwned: 4,
+    soloSelfReviveMs: 3000,
+    soloSelfReviveStock: 3,
+    displayNames: {
+      eisenbrau: 'Eisenbräu',
+      schnellwasser: 'Schnellwasser',
+      doppelschuss: 'Doppelschuss Schnaps',
+      zweiterAtem: 'Zweiter Atem',
+    },
+    eisenbrauHp: 250,
+    schnellwasserReloadMultiplier: 0.5,
+    doppelschussFireRateMultiplier: 1.33,
   },
 
   mysteryCrate: {
@@ -315,6 +349,7 @@ export const CONFIG = {
     earlyRoundFactors: [0.25, 0.3, 0.5, 0.7, 0.9],
     playerCollisionRadiusM: 0.35,
     spawnSpacingM: 0.9,
+    consentedCloseCode: 4000,
   },
 
   wolves: {
@@ -329,6 +364,9 @@ export const CONFIG = {
     damage: 40,
     attackCooldownMs: 700,
     maxActivePerPlayer: 2,
+    spawnIntervalMs: 850,
+    fogSpawnMs: 650,
+    attackWindupMs: 240,
   },
 
   map: {
@@ -383,6 +421,59 @@ export const CONFIG = {
       limbSwingRad: 0.72,
       deathTiltRad: 1.35,
       crawlerHeightScale: 0.48,
+    },
+    wolfVisual: {
+      bodyLengthM: 1.18,
+      bodyHeightM: 0.5,
+      bodyWidthM: 0.38,
+      headRadiusM: 0.25,
+      shoulderHeightM: 0.62,
+      legLengthM: 0.55,
+      legWidthM: 0.1,
+      strideRad: 0.92,
+      cycleHz: 4.8,
+      bodyColor: 0x161b1a,
+      headColor: 0x202625,
+      eyeColor: 0xff1908,
+      deathRollRad: 1.42,
+    },
+    perkVisual: {
+      bodyWidthM: 0.72,
+      bodyHeightM: 1.65,
+      bodyDepthM: 0.56,
+      signHeightM: 0.34,
+      poweredEmissive: 1.6,
+      unpoweredEmissive: 0.03,
+      colors: {
+        eisenbrau: 0x72211f,
+        schnellwasser: 0x63b796,
+        doppelschuss: 0xd0862b,
+        zweiterAtem: 0x78b8d8,
+      },
+    },
+    powerVisual: {
+      leverLengthM: 0.72,
+      offAngleRad: -0.62,
+      onAngleRad: 0.68,
+      surgeIntensity: 2.2,
+    },
+    powerupVisual: {
+      radiusM: 0.32,
+      ringRadiusM: 0.46,
+      glowIntensity: 2.1,
+      lightDistanceM: 4.5,
+      colors: {
+        instaKill: 0x77ef86,
+        doublePoints: 0xe7c34e,
+        nuke: 0xeaf4d8,
+        maxAmmo: 0x79d8ff,
+        carpenter: 0xc99055,
+      },
+    },
+    wolfFog: {
+      color: 0x391014,
+      nearM: 2.5,
+      farM: 24,
     },
     economyVisual: {
       chalkColor: 0xd8dfcb,

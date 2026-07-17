@@ -1,5 +1,5 @@
 import { Client, type Room } from '@colyseus/sdk';
-import { CONFIG, type WeaponId } from '../config.js';
+import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../config.js';
 import type { MovementInput } from '../shared/movement.js';
 import type { AuthoritativePlayerState } from '../game/FirstPersonController.js';
 import type { RemotePlayerPose } from '../game/PreludeScene.js';
@@ -36,6 +36,15 @@ interface WirePlayer {
   doorsOpened: number;
   crateRolls: number;
   grenades: number;
+  perks: { forEach(callback: (perk: string, index: number) => void): void };
+  pendingPerk: string;
+  actionLockRemainingMs: number;
+  selfRevivesRemaining: number;
+  bleedoutRemainingMs: number;
+  selfReviveRemainingMs: number;
+  dead: boolean;
+  reconnectPending: boolean;
+  downed: boolean;
 }
 
 interface WireState {
@@ -48,6 +57,15 @@ interface WireState {
   spawned: number;
   queued: number;
   alive: number;
+  roundKind: string;
+  nextWolfRound: number;
+  wolfAppearance: number;
+  powerOn: boolean;
+  powerActivationElapsedMs: number;
+  gameOver: boolean;
+  instaKillRemainingMs: number;
+  doublePointsRemainingMs: number;
+  nukeRemainingMs: number;
   simulationTimeMs: number;
   openDoors: { forEach(callback: (doorId: string) => void): void };
   crateLocationId: string;
@@ -64,6 +82,7 @@ interface WireState {
   barriers: { forEach(callback: (barrier: NetworkBarrierView, key: string) => void): void };
   enemies: { forEach(callback: (enemy: NetworkEnemyView, key: string) => void): void };
   grenades: { forEach(callback: (grenade: NetworkGrenadeView, key: string) => void): void };
+  powerups: { forEach(callback: (powerup: NetworkPowerupView, key: string) => void): void };
 }
 
 export interface NetworkBarrierView {
@@ -75,7 +94,7 @@ export interface NetworkBarrierView {
 
 export interface NetworkEnemyView {
   id: number;
-  kind: 'zombie' | 'crawler';
+  kind: 'zombie' | 'crawler' | 'wolf';
   state: 'spawn' | 'tear' | 'vault' | 'chase' | 'attack' | 'dead';
   speedTier: 'walk' | 'jog' | 'sprint';
   x: number;
@@ -99,9 +118,20 @@ export interface NetworkGameView {
   queued: number;
   alive: number;
   phase: string;
+  roundKind: 'zombies' | 'wolves';
+  nextWolfRound: number;
+  wolfAppearance: number;
+  powerOn: boolean;
+  powerActivationElapsedMs: number;
+  gameOver: boolean;
+  instaKillRemainingMs: number;
+  doublePointsRemainingMs: number;
+  nukeRemainingMs: number;
   barriers: NetworkBarrierView[];
+  players: NetworkPlayerView[];
   enemies: NetworkEnemyView[];
   grenades: NetworkGrenadeView[];
+  powerups: NetworkPowerupView[];
   openDoors: string[];
   crate: NetworkCrateView;
   localHp: number;
@@ -112,7 +142,38 @@ export interface NetworkGameView {
   localReloading: boolean;
   localReloadRemainingMs: number;
   localGrenades: number;
+  localPerks: PerkId[];
+  localPendingPerk: PerkId | '';
+  localActionLockRemainingMs: number;
+  localSelfRevivesRemaining: number;
+  localBleedoutRemainingMs: number;
+  localSelfReviveRemainingMs: number;
+  localDowned: boolean;
+  localDead: boolean;
+  localSpectating: boolean;
+  localReconnectPending: boolean;
   localStats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number; doorsOpened: number; crateRolls: number };
+}
+
+export interface NetworkPlayerView {
+  id: string;
+  x: number;
+  y: number;
+  z: number;
+  connected: boolean;
+  downed: boolean;
+  spectating: boolean;
+  perks: PerkId[];
+}
+
+export interface NetworkPowerupView {
+  id: number;
+  powerupType: PowerupId;
+  x: number;
+  y: number;
+  z: number;
+  remainingMs: number;
+  guaranteed: boolean;
 }
 
 export interface NetworkGrenadeView {
@@ -155,7 +216,8 @@ export type NetworkFeedback =
   | { kind: 'combat'; source: 'fire' | 'melee'; accepted: boolean; hit: boolean; killed: boolean; headshot?: boolean; points: number; damage: number; enemyId: number | null }
   | { kind: 'points'; amount: number; reason: string }
   | { kind: 'damage'; amount: number; enemyId: number }
-  | { kind: 'reload'; accepted: boolean; weaponId: WeaponId; finishAtMs: number };
+  | { kind: 'reload'; accepted: boolean; weaponId: WeaponId; finishAtMs: number }
+  | { kind: 'game'; event: { type: string; [key: string]: unknown } };
 
 export interface LobbyPlayerView {
   id: string;
@@ -217,6 +279,17 @@ export class CoopClient {
     await this.connect(this.client.joinById(roomCode.trim().toUpperCase(), { name }));
   }
 
+  hasResumeToken(): boolean {
+    return this.readResumeToken() !== null;
+  }
+
+  async resume(): Promise<boolean> {
+    const saved = this.readResumeToken();
+    if (saved === null) return false;
+    await this.connect(this.client.reconnect(saved.reconnectionToken));
+    return true;
+  }
+
   setReady(ready: boolean): void {
     this.room?.send('ready', ready);
   }
@@ -237,6 +310,11 @@ export class CoopClient {
     const room = this.room;
     this.room = null;
     if (room !== null) await room.leave(true);
+    try {
+      localStorage.removeItem(CONFIG.storage.resumeKey);
+    } catch {
+      // Storage may be unavailable; the server still closes the seat explicitly.
+    }
   }
 
   private async connect(roomPromise: Promise<Room>): Promise<void> {
@@ -255,6 +333,9 @@ export class CoopClient {
     });
     room.onMessage('reloadFeedback', (message: { accepted: boolean; weaponId: string; finishAtMs: number }) => {
       this.feedbackListener({ kind: 'reload', accepted: message.accepted, weaponId: normalizeWeaponId(message.weaponId), finishAtMs: message.finishAtMs });
+    });
+    room.onMessage('gameEvent', (event: { type: string; [key: string]: unknown }) => {
+      this.feedbackListener({ kind: 'game', event });
     });
     room.onStateChange(() => this.publish());
     room.onLeave(() => {
@@ -277,6 +358,7 @@ export class CoopClient {
     const state = room.state as WireState;
     if (state === null || state.players === undefined) return;
     const players: LobbyPlayerView[] = [];
+    const simulationPlayers: NetworkPlayerView[] = [];
     const poses: RemotePlayerPose[] = [];
     let local: AuthoritativePlayerState | null = null;
     let localHp: number = CONFIG.player.maxHp;
@@ -287,6 +369,16 @@ export class CoopClient {
     let localReloading = false;
     let localReloadRemainingMs = 0;
     let localGrenades: number = CONFIG.combat.maxGrenades;
+    let localPerks: PerkId[] = [];
+    let localPendingPerk: PerkId | '' = '';
+    let localActionLockRemainingMs = 0;
+    let localSelfRevivesRemaining: number = CONFIG.perkRuntime.soloSelfReviveStock;
+    let localBleedoutRemainingMs = 0;
+    let localSelfReviveRemainingMs = 0;
+    let localDowned = false;
+    let localDead = false;
+    let localSpectating = false;
+    let localReconnectPending = false;
     let localStats = { shots: 0, hits: 0, kills: 0, headshots: 0, pointsEarned: 0, doorsOpened: 0, crateRolls: 0 };
     state.players.forEach((player) => {
       players.push({
@@ -299,6 +391,21 @@ export class CoopClient {
         isSelf: player.id === room.sessionId,
       });
       const isSelf = player.id === room.sessionId;
+      const playerPerks: PerkId[] = [];
+      player.perks?.forEach((perk) => {
+        const normalized = normalizePerkId(perk);
+        if (normalized !== '') playerPerks.push(normalized);
+      });
+      simulationPlayers.push({
+        id: player.id,
+        x: player.x,
+        y: player.y,
+        z: player.z,
+        connected: player.connected,
+        downed: player.downed,
+        spectating: player.spectating,
+        perks: playerPerks,
+      });
       poses.push({
         id: player.id,
         x: player.x,
@@ -306,6 +413,8 @@ export class CoopClient {
         z: player.z,
         yaw: player.yaw,
         connected: player.connected,
+        downed: player.downed,
+        spectating: player.spectating,
         isSelf,
       });
       if (isSelf) {
@@ -324,6 +433,20 @@ export class CoopClient {
         localReloading = player.reloading;
         localReloadRemainingMs = player.reloadRemainingMs;
         localGrenades = player.grenades;
+        localPerks = [];
+        player.perks?.forEach((perk) => {
+          const normalized = normalizePerkId(perk);
+          if (normalized !== '') localPerks.push(normalized);
+        });
+        localPendingPerk = normalizePerkId(player.pendingPerk);
+        localActionLockRemainingMs = player.actionLockRemainingMs;
+        localSelfRevivesRemaining = player.selfRevivesRemaining;
+        localBleedoutRemainingMs = player.bleedoutRemainingMs;
+        localSelfReviveRemainingMs = player.selfReviveRemainingMs;
+        localDowned = player.downed;
+        localDead = player.dead;
+        localSpectating = player.spectating;
+        localReconnectPending = player.reconnectPending;
         localStats = {
           shots: player.shots,
           hits: player.hits,
@@ -392,6 +515,16 @@ export class CoopClient {
       z: grenade.z,
       fuseRemainingMs: grenade.fuseRemainingMs,
     }));
+    const powerups: NetworkPowerupView[] = [];
+    state.powerups?.forEach((powerup) => powerups.push({
+      id: powerup.id,
+      powerupType: normalizePowerupId(powerup.powerupType),
+      x: powerup.x,
+      y: powerup.y,
+      z: powerup.z,
+      remainingMs: powerup.remainingMs,
+      guaranteed: powerup.guaranteed,
+    }));
     const openDoors: string[] = [];
     state.openDoors?.forEach((doorId) => openDoors.push(doorId));
     this.simulationListener({
@@ -402,9 +535,20 @@ export class CoopClient {
       queued: state.queued,
       alive: state.alive,
       phase: state.phase,
+      roundKind: state.roundKind === 'wolves' ? 'wolves' : 'zombies',
+      nextWolfRound: state.nextWolfRound,
+      wolfAppearance: state.wolfAppearance,
+      powerOn: state.powerOn,
+      powerActivationElapsedMs: state.powerActivationElapsedMs,
+      gameOver: state.gameOver,
+      instaKillRemainingMs: state.instaKillRemainingMs,
+      doublePointsRemainingMs: state.doublePointsRemainingMs,
+      nukeRemainingMs: state.nukeRemainingMs,
       barriers,
+      players: simulationPlayers,
       enemies,
       grenades,
+      powerups,
       openDoors,
       crate: {
         activeLocationId: state.crateLocationId,
@@ -424,8 +568,30 @@ export class CoopClient {
       localReloading,
       localReloadRemainingMs,
       localGrenades,
+      localPerks,
+      localPendingPerk,
+      localActionLockRemainingMs,
+      localSelfRevivesRemaining,
+      localBleedoutRemainingMs,
+      localSelfReviveRemainingMs,
+      localDowned,
+      localDead,
+      localSpectating,
+      localReconnectPending,
       localStats,
     });
+  }
+
+  private readResumeToken(): { roomCode: string; reconnectionToken: string } | null {
+    try {
+      const raw = localStorage.getItem(CONFIG.storage.resumeKey);
+      if (raw === null) return null;
+      const value = JSON.parse(raw) as { roomCode?: unknown; reconnectionToken?: unknown };
+      if (typeof value.roomCode !== 'string' || typeof value.reconnectionToken !== 'string' || value.reconnectionToken.length === 0) return null;
+      return { roomCode: value.roomCode, reconnectionToken: value.reconnectionToken };
+    } catch {
+      return null;
+    }
   }
 }
 
@@ -435,4 +601,12 @@ function normalizeWeaponId(value: string): WeaponId {
 
 function normalizeCratePhase(value: string): NetworkCrateView['phase'] {
   return value === 'spinning' || value === 'available' ? value : 'closed';
+}
+
+function normalizePerkId(value: string): PerkId | '' {
+  return Object.prototype.hasOwnProperty.call(CONFIG.perks, value) ? value as PerkId : '';
+}
+
+function normalizePowerupId(value: string): PowerupId {
+  return value === 'instaKill' || value === 'doublePoints' || value === 'nuke' || value === 'carpenter' ? value : 'maxAmmo';
 }

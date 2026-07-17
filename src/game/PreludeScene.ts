@@ -1,7 +1,7 @@
 import * as THREE from 'three';
-import { CONFIG, type WeaponId } from '../config.js';
+import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../config.js';
 import { AudioSystem } from '../audio/AudioSystem.js';
-import { CRATE_LOCATIONS, DOORS, START_POSITIONS, WALL_BUYS, WINDOWS } from '../map/blueprint.js';
+import { CRATE_LOCATIONS, DOORS, PERK_MACHINES, POWER_SWITCH, START_POSITIONS, WALL_BUYS, WINDOWS } from '../map/blueprint.js';
 import { SeededRng } from '../shared/rng.js';
 import type { MovementInput } from '../shared/movement.js';
 import { GameSimulation, type SimCrateState, type SimGrenade, type SimPlayer } from '../shared/GameSimulation.js';
@@ -23,6 +23,8 @@ export interface RemotePlayerPose {
   z: number;
   yaw: number;
   connected: boolean;
+  downed: boolean;
+  spectating: boolean;
   isSelf: boolean;
 }
 
@@ -39,7 +41,16 @@ export interface SceneSimulationReadout {
   spawned: number;
   queued: number;
   alive: number;
-  phase: 'playing' | 'intermission';
+  phase: 'playing' | 'intermission' | 'downed' | 'spectating' | 'gameOver';
+  roundKind: 'zombies' | 'wolves';
+  nextWolfRound: number;
+  wolfAppearance: number;
+  powerOn: boolean;
+  powerActivationElapsedMs: number;
+  gameOver: boolean;
+  instaKillRemainingMs: number;
+  doublePointsRemainingMs: number;
+  nukeRemainingMs: number;
   hp: number;
   maxHp: number;
   points: number;
@@ -49,12 +60,24 @@ export interface SceneSimulationReadout {
   reloadRemainingMs: number;
   stats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number };
   grenades: number;
+  perks: readonly PerkId[];
+  pendingPerk: PerkId | '';
+  actionLockRemainingMs: number;
+  selfRevivesRemaining: number;
+  bleedoutRemainingMs: number;
+  selfReviveRemainingMs: number;
+  downed: boolean;
+  dead: boolean;
+  spectating: boolean;
+  reconnectPending: boolean;
   thrownGrenades: readonly Pick<SimGrenade, 'id' | 'ownerId' | 'x' | 'y' | 'z' | 'fuseRemainingMs'>[];
   openDoors: readonly string[];
   crate: Readonly<SimCrateState>;
   localPlayerId: string;
   barriers: readonly { id: string; room: string; boards: number; repairProgressMs: number }[];
   enemies: readonly SceneEnemyReadout[];
+  powerups: readonly { id: number; powerupType: PowerupId; x: number; y: number; z: number; remainingMs: number; guaranteed: boolean }[];
+  players: readonly { id: string; x: number; y: number; z: number; connected: boolean; downed: boolean; spectating: boolean; perks: readonly PerkId[] }[];
 }
 
 export interface SceneEnemyReadout extends EnemyVisualState {
@@ -81,6 +104,7 @@ interface RemoteVisual {
   group: THREE.Group;
   targetPosition: THREE.Vector3;
   targetYaw: number;
+  targetDowned: boolean;
 }
 
 export class PreludeScene {
@@ -122,6 +146,8 @@ export class PreludeScene {
   private grenadeCookStartedAtMs = -1;
   private hudEventSequence = 0;
   private debugWeaponIndex = 0;
+  private debugPerkIndex = 0;
+  private debugPowerupIndex = 0;
   private readonly hudEvents: HudEvent[] = [];
   private godMode = false;
   private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0 };
@@ -245,6 +271,7 @@ export class PreludeScene {
     if (feedback.kind === 'points') this.recordPoints(feedback.amount, feedback.reason);
     if (feedback.kind === 'damage') this.recordDamage(feedback.amount, feedback.enemyId);
     if (feedback.kind === 'reload' && !feedback.accepted) this.reloadAnimationRemainingMs = 0;
+    if (feedback.kind === 'game') this.processGameEvent(feedback.event);
   }
 
   updateRemotePlayers(poses: readonly RemotePlayerPose[]): void {
@@ -261,6 +288,8 @@ export class PreludeScene {
       }
       visual.targetPosition.set(pose.x, pose.y, pose.z);
       visual.targetYaw = pose.yaw;
+      visual.targetDowned = pose.downed;
+      visual.group.visible = !pose.spectating;
     }
     for (const [id, visual] of this.remotePlayers) {
       if (activeIds.has(id)) continue;
@@ -325,6 +354,32 @@ export class PreludeScene {
       enemy.spawnProgress = 1;
       return true;
     }
+    if (name === 'power') {
+      this.simulation.setPowerOn(true);
+      return true;
+    }
+    if (name === 'perk') {
+      const perks = Object.keys(CONFIG.perks) as PerkId[];
+      const perk = perks[this.debugPerkIndex % perks.length];
+      this.debugPerkIndex += 1;
+      if (perk === undefined) return false;
+      this.simulation.grantPerk(this.soloPlayer, perk);
+      return true;
+    }
+    if (name === 'powerup') {
+      const types: PowerupId[] = ['instaKill', 'doublePoints', 'nuke', 'maxAmmo', 'carpenter'];
+      const type = types[this.debugPowerupIndex % types.length];
+      this.debugPowerupIndex += 1;
+      if (type === undefined) return false;
+      this.simulation.debugSpawnPowerup(type, this.soloPlayer.x, this.soloPlayer.y, this.soloPlayer.z);
+      this.simulation.update(0, [this.soloPlayer]);
+      return true;
+    }
+    if (name === 'wolves') {
+      this.simulation.nextWolfRound = this.simulation.round;
+      this.simulation.debugStartRound(this.simulation.round, [this.soloPlayer]);
+      return true;
+    }
     return false;
   }
 
@@ -339,13 +394,30 @@ export class PreludeScene {
   getSimulationReadout(): SceneSimulationReadout | null {
     if (this.gameMode === 'solo' && this.simulation !== null && this.soloPlayer !== null) {
       const combat = this.simulation.getCombatState(this.soloPlayer.id);
+      const life = this.simulation.getLifeState(this.soloPlayer.id);
+      const phase = this.simulation.gameOver
+        ? 'gameOver'
+        : this.soloPlayer.downed
+          ? 'downed'
+          : this.soloPlayer.spectating === true
+            ? 'spectating'
+            : this.simulation.phase === 'active' ? 'playing' : 'intermission';
       return {
         round: this.simulation.round,
         elapsedMs: this.simulation.elapsedMs,
         spawned: this.simulation.spawnedThisRound,
         queued: this.simulation.queued,
         alive: this.simulation.aliveCount,
-        phase: this.simulation.phase === 'active' ? 'playing' : 'intermission',
+        phase,
+        roundKind: this.simulation.roundKind,
+        nextWolfRound: this.simulation.nextWolfRound,
+        wolfAppearance: this.simulation.wolfAppearance,
+        powerOn: this.simulation.powerOn,
+        powerActivationElapsedMs: this.simulation.powerActivationElapsedMs,
+        gameOver: this.simulation.gameOver,
+        instaKillRemainingMs: this.simulation.effects.instaKillRemainingMs,
+        doublePointsRemainingMs: this.simulation.effects.doublePointsRemainingMs,
+        nukeRemainingMs: this.simulation.effects.nukeRemainingMs,
         hp: this.soloPlayer.hp,
         maxHp: this.soloPlayer.maxHp,
         points: this.soloPlayer.points,
@@ -355,12 +427,33 @@ export class PreludeScene {
         reloadRemainingMs: combat.reloadingWeaponIndex >= 0 ? Math.max(0, combat.reloadFinishAtMs - this.simulation.elapsedMs) : 0,
         stats: combatStats(combat),
         grenades: combat.grenades,
+        perks: combat.perks,
+        pendingPerk: combat.pendingPerk,
+        actionLockRemainingMs: Math.max(0, combat.actionLockedUntilMs - this.simulation.elapsedMs),
+        selfRevivesRemaining: combat.selfRevivesRemaining,
+        bleedoutRemainingMs: life.bleedoutRemainingMs,
+        selfReviveRemainingMs: life.selfReviveRemainingMs,
+        downed: this.soloPlayer.downed,
+        dead: life.dead,
+        spectating: this.soloPlayer.spectating === true,
+        reconnectPending: life.reconnectPending,
         thrownGrenades: [...this.simulation.grenades.values()],
         openDoors: [...this.simulation.openDoors],
         crate: this.simulation.crate,
         localPlayerId: this.soloPlayer.id,
         barriers: [...this.simulation.barriers.values()],
         enemies: [...this.simulation.enemies.values()].map(toEnemyVisual),
+        powerups: [...this.simulation.powerups.values()].map((powerup) => ({ ...powerup, powerupType: powerup.type })),
+        players: [{
+          id: this.soloPlayer.id,
+          x: this.soloPlayer.x,
+          y: this.soloPlayer.y,
+          z: this.soloPlayer.z,
+          connected: this.soloPlayer.connected,
+          downed: this.soloPlayer.downed,
+          spectating: this.soloPlayer.spectating === true,
+          perks: combat.perks,
+        }],
       };
     }
     const network = this.networkSimulation;
@@ -371,7 +464,16 @@ export class PreludeScene {
         spawned: network.spawned,
         queued: network.queued,
         alive: network.alive,
-        phase: network.phase === 'intermission' ? 'intermission' : 'playing',
+        phase: network.gameOver ? 'gameOver' : network.localDowned ? 'downed' : network.localSpectating ? 'spectating' : network.phase === 'intermission' ? 'intermission' : 'playing',
+        roundKind: network.roundKind,
+        nextWolfRound: network.nextWolfRound,
+        wolfAppearance: network.wolfAppearance,
+        powerOn: network.powerOn,
+        powerActivationElapsedMs: network.powerActivationElapsedMs,
+        gameOver: network.gameOver,
+        instaKillRemainingMs: network.instaKillRemainingMs,
+        doublePointsRemainingMs: network.doublePointsRemainingMs,
+        nukeRemainingMs: network.nukeRemainingMs,
         hp: network.localHp,
         maxHp: network.localMaxHp,
         points: network.localPoints,
@@ -381,12 +483,24 @@ export class PreludeScene {
         reloadRemainingMs: network.localReloadRemainingMs,
         stats: network.localStats,
         grenades: network.localGrenades,
+        perks: network.localPerks,
+        pendingPerk: network.localPendingPerk,
+        actionLockRemainingMs: network.localActionLockRemainingMs,
+        selfRevivesRemaining: network.localSelfRevivesRemaining,
+        bleedoutRemainingMs: network.localBleedoutRemainingMs,
+        selfReviveRemainingMs: network.localSelfReviveRemainingMs,
+        downed: network.localDowned,
+        dead: network.localDead,
+        spectating: network.localSpectating,
+        reconnectPending: network.localReconnectPending,
         thrownGrenades: network.grenades,
         openDoors: network.openDoors,
         crate: network.crate,
         localPlayerId: network.localPlayerId,
         barriers: network.barriers,
         enemies: network.enemies.map(toEnemyVisual),
+        powerups: network.powerups,
+        players: network.players,
       };
     }
     return null;
@@ -404,6 +518,11 @@ export class PreludeScene {
     const add = (distance: number, prompt: string): void => {
       if (distance <= CONFIG.controller.interactionRangeM) candidates.push({ distance, prompt });
     };
+    if (readout.downed || readout.spectating || readout.gameOver) return null;
+    for (const player of readout.players) {
+      if (player.id === readout.localPlayerId || !player.connected || !player.downed) continue;
+      add(Math.hypot(controller.x - player.x, controller.y - player.y, controller.z - player.z), 'Hold F to revive teammate');
+    }
     for (const barrier of readout.barriers) {
       if (barrier.boards >= CONFIG.barriers.boardSlots) continue;
       const window = WINDOWS.find((candidate) => candidate.id === barrier.id);
@@ -431,6 +550,16 @@ export class PreludeScene {
       if (readout.crate.phase === 'closed') add(distance, `Hold F for Mystery Crate [Cost: ${CONFIG.economy.mysteryCrate}]`);
       if (readout.crate.phase === 'available' && readout.crate.purchaserId === readout.localPlayerId && readout.crate.weaponId !== '') {
         add(distance, `Hold F to take ${CONFIG.weapons[readout.crate.weaponId].name}`);
+      }
+    }
+    const switchDistance = Math.hypot(controller.x - POWER_SWITCH.x, controller.y + CONFIG.controller.eyeHeightM - POWER_SWITCH.y, controller.z - POWER_SWITCH.z);
+    if (!readout.powerOn) add(switchDistance, 'Hold F to turn on the Power');
+    for (const machine of PERK_MACHINES) {
+      const distance = Math.hypot(controller.x - machine.x, controller.y - machine.y, controller.z - machine.z);
+      if (!readout.powerOn) add(distance, 'Power must be activated first');
+      else if (!readout.perks.includes(machine.id)) {
+        const cost = machine.id === 'zweiterAtem' && this.gameMode === 'solo' ? CONFIG.perks.zweiterAtem.costSolo : CONFIG.perks[machine.id].cost;
+        add(distance, `Hold F for ${CONFIG.perkRuntime.displayNames[machine.id]} [Cost: ${cost}]`);
       }
     }
     candidates.sort((left, right) => left.distance - right.distance);
@@ -691,7 +820,7 @@ export class PreludeScene {
     head.position.y = 1.56;
     head.castShadow = true;
     group.add(head);
-    return { group, targetPosition: new THREE.Vector3(), targetYaw: 0 };
+    return { group, targetPosition: new THREE.Vector3(), targetYaw: 0, targetDowned: false };
   }
 
   private updateGameplay(delta: number): void {
@@ -741,6 +870,7 @@ export class PreludeScene {
     for (const visual of this.remotePlayers.values()) {
       visual.group.position.lerp(visual.targetPosition, interpolationAlpha);
       visual.group.rotation.y = lerpAngle(visual.group.rotation.y, visual.targetYaw, interpolationAlpha);
+      visual.group.rotation.z = THREE.MathUtils.lerp(visual.group.rotation.z, visual.targetDowned ? -1.2 : 0, interpolationAlpha);
     }
   }
 
@@ -775,7 +905,9 @@ export class PreludeScene {
       meleeArc * CONFIG.rendering.viewmodel.meleeYawRad,
       rotationAlpha,
     );
-    const reloadDuration = weapon === undefined ? 1 : CONFIG.weapons[weapon.id].reloadMs;
+    const reloadDuration = weapon === undefined
+      ? 1
+      : CONFIG.weapons[weapon.id].reloadMs * (simulation?.perks.includes('schnellwasser') ? CONFIG.perkRuntime.schnellwasserReloadMultiplier : 1);
     const reloadProgress = this.reloadAnimationRemainingMs > 0 ? 1 - this.reloadAnimationRemainingMs / reloadDuration : 0;
     const reloadArc = this.reloadAnimationRemainingMs > 0 ? Math.sin(reloadProgress * Math.PI) : 0;
     viewmodel.position.y -= reloadArc * CONFIG.rendering.viewmodel.reloadDropM;
@@ -785,11 +917,20 @@ export class PreludeScene {
   private refreshSimulationVisuals(): void {
     const readout = this.getSimulationReadout();
     if (readout === null) return;
+    this.controller?.setMovementEnabled(!readout.downed && !readout.spectating && !readout.gameOver);
     this.enemyRenderer?.update(readout.enemies);
     this.bunkerMap?.updateBarriers(readout.barriers);
     for (const door of DOORS) this.bunkerMap?.setDoorOpen(door.id, readout.openDoors.includes(door.id));
     this.bunkerMap?.updateCrate(readout.crate, readout.elapsedMs);
     this.bunkerMap?.updateGrenades(readout.thrownGrenades);
+    this.bunkerMap?.updatePower(readout.powerOn, readout.powerActivationElapsedMs);
+    this.bunkerMap?.updatePowerups(readout.powerups, readout.elapsedMs);
+    const fog = this.scene.fog;
+    if (fog instanceof THREE.Fog) {
+      fog.color.setHex(readout.roundKind === 'wolves' ? CONFIG.rendering.wolfFog.color : CONFIG.rendering.fogColor);
+      fog.near = readout.roundKind === 'wolves' ? CONFIG.rendering.wolfFog.nearM : CONFIG.rendering.fogNearM;
+      fog.far = readout.roundKind === 'wolves' ? CONFIG.rendering.wolfFog.farM : CONFIG.rendering.fogFarM;
+    }
   }
 
   private readonly handleFireChange = (held: boolean): void => {
@@ -800,7 +941,8 @@ export class PreludeScene {
   private fireWeapon(playEmpty: boolean): void {
     const controllerReadout = this.controller?.getReadout();
     const simulationReadout = this.getSimulationReadout();
-    if (controllerReadout === undefined || controllerReadout === null || simulationReadout === null) return;
+    if (controllerReadout === undefined || controllerReadout === null || simulationReadout === null
+      || simulationReadout.spectating || simulationReadout.gameOver) return;
     const weapon = simulationReadout.weapons[simulationReadout.activeWeaponIndex];
     if (weapon === undefined) return;
     if (simulationReadout.reloading || weapon.magazine <= 0) {
@@ -811,7 +953,8 @@ export class PreludeScene {
     if (this.gameMode === 'coop') {
       const nowMs = this.gameplayElapsed * 1000;
       if (nowMs < this.nextCosmeticFireAtMs) return;
-      this.nextCosmeticFireAtMs = nowMs + 60000 / CONFIG.weapons[weapon.id].rpm;
+      const fireRateMultiplier = simulationReadout.perks.includes('doppelschuss') ? CONFIG.perkRuntime.doppelschussFireRateMultiplier : 1;
+      this.nextCosmeticFireAtMs = nowMs + 60000 / (CONFIG.weapons[weapon.id].rpm * fireRateMultiplier);
       this.sendAction?.({ type: 'fire', ads: controllerReadout.ads });
       this.playLocalShot(weapon.id);
       return;
@@ -829,7 +972,7 @@ export class PreludeScene {
 
   private readonly handleReload = (): void => {
     const readout = this.getSimulationReadout();
-    if (readout === null) return;
+    if (readout === null || readout.spectating || readout.gameOver) return;
     const weapon = readout.weapons[readout.activeWeaponIndex];
     if (weapon === undefined || readout.reloading || weapon.reserve <= 0 || weapon.magazine >= CONFIG.weapons[weapon.id].magazine) return;
     if (this.gameMode === 'coop') {
@@ -838,7 +981,8 @@ export class PreludeScene {
       const result = this.simulation.requestReload(this.soloPlayer.id);
       if (!result.accepted) return;
     }
-    this.reloadAnimationRemainingMs = CONFIG.weapons[weapon.id].reloadMs;
+    const reloadMultiplier = readout.perks.includes('schnellwasser') ? CONFIG.perkRuntime.schnellwasserReloadMultiplier : 1;
+    this.reloadAnimationRemainingMs = CONFIG.weapons[weapon.id].reloadMs * reloadMultiplier;
     this.nextCosmeticFireAtMs = 0;
     this.audio.playReload(weapon.id);
   };
@@ -873,6 +1017,13 @@ export class PreludeScene {
       if (event.type === 'boardRepaired') this.recordPoints(event.points, 'barrier repair');
       if (event.type === 'pointTransaction') this.recordPoints(event.amount, event.reason);
       if (event.type === 'playerDamaged') this.recordDamage(event.damage, event.enemyId);
+      this.processGameEvent(event as { type: string; [key: string]: unknown });
+    }
+  }
+
+  private processGameEvent(event: { type: string; [key: string]: unknown }): void {
+    if (event.type === 'powerupCollected' && typeof event.powerupType === 'string') {
+      this.pushHudEvent({ type: 'points', amount: 0, reason: event.powerupType });
     }
   }
 
@@ -1020,7 +1171,7 @@ function lerpAngle(from: number, to: number, alpha: number): number {
 
 function toEnemyVisual(enemy: {
   id: number;
-  kind: 'zombie' | 'crawler';
+  kind: 'zombie' | 'crawler' | 'wolf';
   state: EnemyVisualState['state'];
   speedTier: EnemyVisualState['speedTier'];
   x: number;
