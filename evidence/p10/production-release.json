@@ -1,0 +1,30 @@
+{
+  "observedAt": "2026-07-17T23:57:00+10:00",
+  "client": {
+    "alias": "https://zombies-ebon.vercel.app",
+    "deploymentId": "dpl_9cYwRHXCvkxgQkAMSuULge4MBao5",
+    "artifact": "index-CabKoI4N.js",
+    "sha256": "0b9f7bd2cf1c07522c263dd08b4024b8ee2bf73b06651319af3c104f41b59de7",
+    "browser": {
+      "seed": 12345,
+      "menuLoaded": true,
+      "soloStarted": true,
+      "pointerLockInputAccepted": true,
+      "coOpRoom": "PXJCGW",
+      "consoleErrors": 0
+    }
+  },
+  "server": {
+    "endpoint": "wss://au-mel-0087c50b.colyseus.cloud",
+    "protocolVersion": 2,
+    "productionOrigin": "https://zombies-ebon.vercel.app",
+    "untrustedWebSocketStatus": 401
+  },
+  "verification": {
+    "testFiles": 13,
+    "tests": 115,
+    "runtimeAuditVulnerabilities": 0,
+    "proprietaryNameMatches": 0,
+    "nondeterministicGameplayRngMatches": 0
+  }
+}

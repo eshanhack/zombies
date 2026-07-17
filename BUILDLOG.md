@@ -237,3 +237,23 @@ Status: passed
   - Production browser diagnostics reported offline cache `ready`, a running 48 kHz audio graph, and zero console/page errors. The exact loaded script URL ended in `index-CabKoI4N.js`.
   - Evidence is committed in `evidence/p9/stress-24-enemies-3-remotes-1080.png` and `evidence/p9/stress-frame-pacing-1080.png`; the former visibly records the three remote rigs and final telemetry.
 - Fidelity hardening evidence: every weapon retains a unique recoil/spread/reload/action signature; every enemy state remains represented in the original rigs; co-op enemies interpolate over the configured 100 ms window; local fire stays immediate while server-confirmed rewind owns damage and points; the rolling 30-second median/p95 frame telemetry is exposed through both F1 and the versioned debug snapshot.
+
+## P10 — Release
+
+Status: passed
+
+- Timestamp: 2026-07-17T23:57:00+10:00
+- Release revision: `5e1791b` (server) with final release documentation committed immediately after this gate
+- Production client: `https://zombies-ebon.vercel.app`
+- Production authoritative server: `wss://au-mel-0087c50b.colyseus.cloud`
+- Automated checks:
+  - `npm run test`: 13 files / 115 tests passed.
+  - `npm run build`: TypeScript client and server builds passed; PWA precache contains 12 entries / 4,621.22 KiB. Final client artifact `index-CabKoI4N.js` is 951,444 bytes / 257.67 kB gzip with SHA-256 `0b9f7bd2cf1c07522c263dd08b4024b8ee2bf73b06651319af3c104f41b59de7`.
+  - `npm run gate:p10:release`: passed; production runtime dependency audit found 0 vulnerabilities across 59 packages, license audit passed, proprietary-content scan found 0 matches, and gameplay RNG scan found 0 nondeterministic matches.
+  - The live Cloud gate passed protocol v2, exact production-origin CORS, denied untrusted health-origin reflection, denied untrusted matchmaking preflight, and rejected an untrusted WebSocket handshake with HTTP 401.
+- Deployment evidence:
+  - Colyseus Cloud staged the authoritative Node 22 service in Melbourne from `codex/stahlbunker-v1`; its live `/health` endpoint and WebSocket origin policy passed against the Vercel production origin.
+  - Vercel production deployment `dpl_9cYwRHXCvkxgQkAMSuULge4MBao5` built successfully and the `zombies-ebon.vercel.app` alias was promoted to it.
+  - Browser acceptance on the exact public production alias loaded the menu with seed `12345`, reported an online link, entered Solo and accepted pointer-lock input with zero console errors, and created/left live private room `PXJCGW` against the Cloud server.
+  - A clean local cold-load / cached-offline Solo loop, game-over/restart sequence, and two-browser co-op flow remain captured under `evidence/p10/`; the public production exercise adds the live service check above.
+- Release hygiene: `README.md`, `DEPLOYMENT.md`, `SECURITY.md`, `assets/CREDITS.md`, controls, PWA cache, environment wiring, and production evidence are complete. No known client or server exceptions remained in the release checks.
