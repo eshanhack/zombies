@@ -31,6 +31,7 @@ export class AppShell {
   private readonly pointLedger: HTMLElement;
   private readonly weaponName: HTMLElement;
   private readonly ammoValue: HTMLElement;
+  private readonly grenadeValue: HTMLElement;
   private readonly reserveValue: HTMLElement;
   private readonly reloadStatus: HTMLElement;
   private readonly roundCanvas: HTMLCanvasElement;
@@ -72,7 +73,7 @@ export class AppShell {
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P3 GUNPLAY / HUD</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P4 ARSENAL / ECONOMY</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -84,6 +85,7 @@ export class AppShell {
         <div><dt>Weapon</dt><dd data-debug="weapon">Melder · 8 / 32</dd></div>
         <div><dt>Barrier boards</dt><dd data-debug="barriers">0 / 0</dd></div>
         <div><dt>Enemy states</dt><dd data-debug="enemy-states">none</dd></div>
+        <div><dt>Doors / crate / grenades</dt><dd data-debug="economy">0 · closed · 4</dd></div>
         <div><dt>Controller</dt><dd data-debug="controller">menu</dd></div>
       </dl>
       <div class="debug-actions">
@@ -96,6 +98,7 @@ export class AppShell {
         <button data-debug-action="nav">Navgraph</button>
         <button data-debug-action="hp">HP bars</button>
         <button data-debug-action="jager">Grant Jäger K-8</button>
+        <button data-debug-action="arsenal">Cycle conventional weapon</button>
         <button data-debug-action="target">Spawn aim target</button>
       </div>
     `;
@@ -127,6 +130,7 @@ export class AppShell {
     this.pointLedger = this.hud.querySelector('.point-ledger') as HTMLElement;
     this.weaponName = this.hud.querySelector('.weapon-name') as HTMLElement;
     this.ammoValue = this.hud.querySelector('.ammo-value') as HTMLElement;
+    this.grenadeValue = this.hud.querySelector('.weapon-hud em') as HTMLElement;
     this.reserveValue = this.hud.querySelector('.weapon-hud b') as HTMLElement;
     this.reloadStatus = this.hud.querySelector('.reload-status') as HTMLElement;
     this.roundCanvas = this.hud.querySelector('.round-hud canvas') as HTMLCanvasElement;
@@ -226,6 +230,8 @@ export class AppShell {
         this.renderSnapshot(snapshot);
         const combat = scene.getSimulationReadout();
         const weapon = combat?.weapons[combat.activeWeaponIndex];
+        const economy = this.overlay.querySelector<HTMLElement>('[data-debug="economy"]');
+        if (economy !== null && combat !== null) economy.textContent = `${combat.openDoors.length} · ${combat.crate.phase} @ ${combat.crate.activeLocationId} · ${combat.grenades}`;
         this.pointsValue.textContent = String(combat?.points ?? snapshot.players[0]?.points ?? 0);
         if (weapon !== undefined) {
           this.weaponName.textContent = `${weapon.upgraded ? 'Über-' : ''}${CONFIG.weapons[weapon.id].name}`;
@@ -233,6 +239,7 @@ export class AppShell {
           this.reserveValue.textContent = String(weapon.reserve);
           this.reloadStatus.textContent = combat?.reloading ? `RELOADING · ${(combat.reloadRemainingMs / 1000).toFixed(1)}s` : '';
         }
+        this.grenadeValue.textContent = `◆ × ${combat?.grenades ?? CONFIG.combat.maxGrenades}`;
         this.hud.classList.toggle('is-low-health', (combat?.hp ?? CONFIG.player.maxHp) < CONFIG.player.maxHp * 0.3);
       }
       for (const event of scene.drainHudEvents()) this.renderHudEvent(event);

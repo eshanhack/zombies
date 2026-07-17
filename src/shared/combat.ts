@@ -6,12 +6,13 @@ export interface RuntimeWeaponState {
   magazine: number;
   reserve: number;
   upgraded: boolean;
+  readyAtMs: number;
 }
 
 export interface CombatPlayerState {
   weapons: RuntimeWeaponState[];
   activeWeaponIndex: number;
-  nextFireAtMs: number;
+  switchReadyAtMs: number;
   reloadFinishAtMs: number;
   reloadingWeaponIndex: number;
   shots: number;
@@ -19,6 +20,9 @@ export interface CombatPlayerState {
   kills: number;
   headshots: number;
   pointsEarned: number;
+  doorsOpened: number;
+  crateRolls: number;
+  grenades: number;
 }
 
 export interface FireResult {
@@ -31,6 +35,7 @@ export interface FireResult {
   headshot: boolean;
   killed: boolean;
   enemyId: number | null;
+  pelletHits: number;
   damage: number;
   points: number;
 }
@@ -56,9 +61,10 @@ export function createCombatPlayerState(): CombatPlayerState {
       magazine: CONFIG.weapons.melder.magazine,
       reserve: CONFIG.weapons.melder.reserve,
       upgraded: false,
+      readyAtMs: 0,
     }],
     activeWeaponIndex: 0,
-    nextFireAtMs: 0,
+    switchReadyAtMs: 0,
     reloadFinishAtMs: 0,
     reloadingWeaponIndex: -1,
     shots: 0,
@@ -66,6 +72,9 @@ export function createCombatPlayerState(): CombatPlayerState {
     kills: 0,
     headshots: 0,
     pointsEarned: 0,
+    doorsOpened: 0,
+    crateRolls: 0,
+    grenades: CONFIG.combat.maxGrenades,
   };
 }
 
@@ -75,6 +84,7 @@ export function activeWeapon(state: CombatPlayerState): RuntimeWeaponState {
     magazine: 0,
     reserve: 0,
     upgraded: false,
+    readyAtMs: 0,
   };
 }
 

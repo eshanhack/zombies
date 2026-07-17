@@ -1,4 +1,4 @@
-import { CONFIG, type RoomId } from '../config.js';
+import { CONFIG, type RoomId, type WeaponId } from '../config.js';
 
 export type ColliderKind = 'wall' | 'door' | 'obstacle' | 'railing';
 
@@ -27,6 +27,27 @@ export interface DoorBlueprint {
   id: 'doorA' | 'doorB' | 'doorC';
   cost: number;
   collider: AabbCollider;
+}
+
+export interface WallBuyBlueprint {
+  id: string;
+  kind: 'weapon' | 'grenades';
+  weaponId?: WeaponId;
+  room: RoomId;
+  cost: number;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
+export interface CrateLocationBlueprint {
+  id: string;
+  room: RoomId;
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
 }
 
 export type WindowFacing = 'north' | 'south' | 'east' | 'west';
@@ -60,6 +81,21 @@ export const DOORS: readonly DoorBlueprint[] = [
   { id: 'doorA', cost: CONFIG.economy.doorCosts[0], collider: door('doorA', -6.25, -4.15, 0, CONFIG.map.doorHeightM, 6.08, 6.08 + CONFIG.map.wallThicknessM) },
   { id: 'doorB', cost: CONFIG.economy.doorCosts[1], collider: door('doorB', -2.15, -2.15 + CONFIG.map.wallThicknessM, 0, CONFIG.map.doorHeightM, 11, 13) },
   { id: 'doorC', cost: CONFIG.economy.doorCosts[2], collider: door('doorC', 9.45, 12.55, 2.78, 2.78 + CONFIG.map.doorHeightM, 11.82, 11.82 + CONFIG.map.wallThicknessM) },
+] as const;
+
+export const WALL_BUYS: readonly WallBuyBlueprint[] = [
+  { id: 'wall-jaeger', kind: 'weapon', weaponId: 'jaeger', room: 'start', cost: CONFIG.weapons.jaeger.cost, x: -6.72, y: 1.35, z: 0.7, yaw: Math.PI / 2 },
+  { id: 'wall-grenades', kind: 'grenades', room: 'start', cost: CONFIG.economy.grenadesX4, x: 6.72, y: 1.25, z: 0.7, yaw: -Math.PI / 2 },
+  { id: 'wall-kurier', kind: 'weapon', weaponId: 'kurier', room: 'armory', cost: CONFIG.weapons.kurier.cost, x: -11.8, y: 1.35, z: 16.72, yaw: Math.PI },
+  { id: 'wall-sturmvogel', kind: 'weapon', weaponId: 'sturmvogel', room: 'armory', cost: CONFIG.weapons.sturmvogel.cost, x: -5.28, y: 1.35, z: 15.1, yaw: -Math.PI / 2 },
+  { id: 'wall-doppelhieb', kind: 'weapon', weaponId: 'doppelhieb', room: 'generator', cost: CONFIG.weapons.doppelhieb.cost, x: 12.72, y: 1.35, z: 13.1, yaw: -Math.PI / 2 },
+  { id: 'wall-lasttraeger', kind: 'weapon', weaponId: 'lasttraeger', room: 'catwalk', cost: CONFIG.weapons.lasttraeger.cost, x: 4.2, y: 4.58, z: 8.28, yaw: 0 },
+] as const;
+
+export const CRATE_LOCATIONS: readonly CrateLocationBlueprint[] = [
+  { id: 'crate-armory', room: 'armory', x: -10.5, y: 0, z: 12.3, yaw: 0.18 },
+  { id: 'crate-generator', room: 'generator', x: 9.6, y: 0, z: 14.7, yaw: -0.35 },
+  { id: 'crate-start', room: 'start', x: 4.3, y: 0, z: 1.8, yaw: Math.PI },
 ] as const;
 
 export const WINDOWS: readonly WindowBlueprint[] = [

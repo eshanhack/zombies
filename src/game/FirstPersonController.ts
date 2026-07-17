@@ -17,7 +17,8 @@ export interface ControllerOptions {
   sendInput?: (input: MovementInput) => void;
   onMelee?: () => void;
   onInteractChange?: (held: boolean) => void;
-  onFire?: () => void;
+  onFireChange?: (held: boolean) => void;
+  onGrenadeChange?: (held: boolean) => void;
   onReload?: () => void;
   onSwitchWeapon?: (index: number) => void;
 }
@@ -45,7 +46,8 @@ export class FirstPersonController {
   private readonly sendInput?: (input: MovementInput) => void;
   private readonly onMelee?: () => void;
   private readonly onInteractChange?: (held: boolean) => void;
-  private readonly onFire?: () => void;
+  private readonly onFireChange?: (held: boolean) => void;
+  private readonly onGrenadeChange?: (held: boolean) => void;
   private readonly onReload?: () => void;
   private readonly onSwitchWeapon?: (index: number) => void;
   private readonly pressed = new Set<string>();
@@ -69,7 +71,8 @@ export class FirstPersonController {
     this.sendInput = options.sendInput;
     this.onMelee = options.onMelee;
     this.onInteractChange = options.onInteractChange;
-    this.onFire = options.onFire;
+    this.onFireChange = options.onFireChange;
+    this.onGrenadeChange = options.onGrenadeChange;
     this.onReload = options.onReload;
     this.onSwitchWeapon = options.onSwitchWeapon;
     this.state = {
@@ -181,6 +184,8 @@ export class FirstPersonController {
     if (this.disposed) return;
     this.disposed = true;
     this.onInteractChange?.(false);
+    this.onFireChange?.(false);
+    this.onGrenadeChange?.(false);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('mousemove', this.onMouseMove);
@@ -209,6 +214,7 @@ export class FirstPersonController {
     this.pressed.add(event.code);
     if (event.code === 'KeyV' && !event.repeat) this.onMelee?.();
     if (event.code === 'KeyF' && !event.repeat) this.onInteractChange?.(true);
+    if (event.code === 'KeyG' && !event.repeat) this.onGrenadeChange?.(true);
     if (event.code === 'KeyR' && !event.repeat) this.onReload?.();
     if (event.code === 'Digit1' && !event.repeat) this.onSwitchWeapon?.(0);
     if (event.code === 'Digit2' && !event.repeat) this.onSwitchWeapon?.(1);
@@ -217,6 +223,7 @@ export class FirstPersonController {
   private readonly onKeyUp = (event: KeyboardEvent): void => {
     this.pressed.delete(event.code);
     if (event.code === 'KeyF') this.onInteractChange?.(false);
+    if (event.code === 'KeyG') this.onGrenadeChange?.(false);
   };
 
   private readonly onMouseMove = (event: MouseEvent): void => {
@@ -232,11 +239,12 @@ export class FirstPersonController {
   private readonly onMouseDown = (event: MouseEvent): void => {
     if (event.button === 2) this.ads = true;
     if (event.button === 1) this.onMelee?.();
-    if (event.button === 0 && event.target === this.canvas) this.onFire?.();
+    if (event.button === 0 && event.target === this.canvas) this.onFireChange?.(true);
   };
 
   private readonly onMouseUp = (event: MouseEvent): void => {
     if (event.button === 2) this.ads = false;
+    if (event.button === 0) this.onFireChange?.(false);
   };
 
   private readonly onContextMenu = (event: MouseEvent): void => {

@@ -39,6 +39,9 @@ export class NetPlayer extends Schema {
   @type('uint32') kills: number = 0;
   @type('uint32') headshots: number = 0;
   @type('uint32') pointsEarned: number = 0;
+  @type('uint16') doorsOpened: number = 0;
+  @type('uint16') crateRolls: number = 0;
+  @type('uint8') grenades: number = CONFIG.combat.maxGrenades;
 }
 
 export class NetBarrier extends Schema {
@@ -66,6 +69,15 @@ export class NetEnemy extends Schema {
   @type('float32') spawnProgress: number = 0;
 }
 
+export class NetGrenade extends Schema {
+  @type('uint32') id: number = 0;
+  @type('string') ownerId: string = '';
+  @type('float32') x: number = 0;
+  @type('float32') y: number = 0;
+  @type('float32') z: number = 0;
+  @type('float32') fuseRemainingMs: number = 0;
+}
+
 export class BunkerState extends Schema {
   @type('uint32') seed: number = CONFIG.simulation.seedFallback;
   @type('string') roomCode: string = '';
@@ -79,7 +91,17 @@ export class BunkerState extends Schema {
   @type('boolean') powerOn: boolean = false;
   @type('float64') serverTimeMs: number = 0;
   @type('float64') simulationTimeMs: number = 0;
+  @type(['string']) openDoors: ArraySchema<string> = new ArraySchema<string>();
+  @type('string') crateLocationId: string = CONFIG.mysteryCrate.startingLocationId;
+  @type('string') cratePhase: string = 'closed';
+  @type('string') cratePurchaserId: string = '';
+  @type('string') crateWeaponId: string = '';
+  @type('boolean') cratePendingPuppe: boolean = false;
+  @type('float32') crateSpinRemainingMs: number = 0;
+  @type('float32') crateGrabRemainingMs: number = 0;
+  @type('uint16') crateUsesAtLocation: number = 0;
   @type({ map: NetPlayer }) players: MapSchema<NetPlayer> = new MapSchema<NetPlayer>();
   @type({ map: NetBarrier }) barriers: MapSchema<NetBarrier> = new MapSchema<NetBarrier>();
   @type({ map: NetEnemy }) enemies: MapSchema<NetEnemy> = new MapSchema<NetEnemy>();
+  @type({ map: NetGrenade }) grenades: MapSchema<NetGrenade> = new MapSchema<NetGrenade>();
 }

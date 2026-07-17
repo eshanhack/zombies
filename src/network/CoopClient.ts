@@ -33,6 +33,9 @@ interface WirePlayer {
   kills: number;
   headshots: number;
   pointsEarned: number;
+  doorsOpened: number;
+  crateRolls: number;
+  grenades: number;
 }
 
 interface WireState {
@@ -46,11 +49,21 @@ interface WireState {
   queued: number;
   alive: number;
   simulationTimeMs: number;
+  openDoors: { forEach(callback: (doorId: string) => void): void };
+  crateLocationId: string;
+  cratePhase: string;
+  cratePurchaserId: string;
+  crateWeaponId: string;
+  cratePendingPuppe: boolean;
+  crateSpinRemainingMs: number;
+  crateGrabRemainingMs: number;
+  crateUsesAtLocation: number;
   players: {
     forEach(callback: (player: WirePlayer, key: string) => void): void;
   };
   barriers: { forEach(callback: (barrier: NetworkBarrierView, key: string) => void): void };
   enemies: { forEach(callback: (enemy: NetworkEnemyView, key: string) => void): void };
+  grenades: { forEach(callback: (grenade: NetworkGrenadeView, key: string) => void): void };
 }
 
 export interface NetworkBarrierView {
@@ -79,6 +92,7 @@ export interface NetworkEnemyView {
 }
 
 export interface NetworkGameView {
+  localPlayerId: string;
   round: number;
   elapsedMs: number;
   spawned: number;
@@ -87,6 +101,9 @@ export interface NetworkGameView {
   phase: string;
   barriers: NetworkBarrierView[];
   enemies: NetworkEnemyView[];
+  grenades: NetworkGrenadeView[];
+  openDoors: string[];
+  crate: NetworkCrateView;
   localHp: number;
   localMaxHp: number;
   localPoints: number;
@@ -94,7 +111,28 @@ export interface NetworkGameView {
   localActiveWeaponIndex: number;
   localReloading: boolean;
   localReloadRemainingMs: number;
-  localStats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number };
+  localGrenades: number;
+  localStats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number; doorsOpened: number; crateRolls: number };
+}
+
+export interface NetworkGrenadeView {
+  id: number;
+  ownerId: string;
+  x: number;
+  y: number;
+  z: number;
+  fuseRemainingMs: number;
+}
+
+export interface NetworkCrateView {
+  activeLocationId: string;
+  phase: 'closed' | 'spinning' | 'available';
+  purchaserId: string;
+  weaponId: WeaponId | '';
+  pendingPuppe: boolean;
+  spinRemainingMs: number;
+  grabRemainingMs: number;
+  usesAtLocation: number;
 }
 
 export interface NetworkWeaponView {
@@ -102,14 +140,16 @@ export interface NetworkWeaponView {
   magazine: number;
   reserve: number;
   upgraded: boolean;
+  readyAtMs: number;
 }
 
 export type ClientAction =
   | { type: 'melee' }
-  | { type: 'repair'; held: boolean }
+  | { type: 'interact'; held: boolean }
   | { type: 'fire'; ads: boolean }
   | { type: 'reload' }
-  | { type: 'switch'; index: number };
+  | { type: 'switch'; index: number }
+  | { type: 'grenade'; cookedMs: number };
 
 export type NetworkFeedback =
   | { kind: 'combat'; source: 'fire' | 'melee'; accepted: boolean; hit: boolean; killed: boolean; headshot?: boolean; points: number; damage: number; enemyId: number | null }
@@ -242,11 +282,12 @@ export class CoopClient {
     let localHp: number = CONFIG.player.maxHp;
     let localMaxHp: number = CONFIG.player.maxHp;
     let localPoints: number = CONFIG.points.starting;
-    let localWeapons: NetworkWeaponView[] = [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false }];
+    let localWeapons: NetworkWeaponView[] = [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false, readyAtMs: 0 }];
     let localActiveWeaponIndex = 0;
     let localReloading = false;
     let localReloadRemainingMs = 0;
-    let localStats = { shots: 0, hits: 0, kills: 0, headshots: 0, pointsEarned: 0 };
+    let localGrenades: number = CONFIG.combat.maxGrenades;
+    let localStats = { shots: 0, hits: 0, kills: 0, headshots: 0, pointsEarned: 0, doorsOpened: 0, crateRolls: 0 };
     state.players.forEach((player) => {
       players.push({
         id: player.id,
@@ -277,11 +318,21 @@ export class CoopClient {
           magazine: weapon.magazine,
           reserve: weapon.reserve,
           upgraded: weapon.upgraded,
+          readyAtMs: 0,
         }));
         localActiveWeaponIndex = player.activeWeaponIndex;
         localReloading = player.reloading;
         localReloadRemainingMs = player.reloadRemainingMs;
-        localStats = { shots: player.shots, hits: player.hits, kills: player.kills, headshots: player.headshots, pointsEarned: player.pointsEarned };
+        localGrenades = player.grenades;
+        localStats = {
+          shots: player.shots,
+          hits: player.hits,
+          kills: player.kills,
+          headshots: player.headshots,
+          pointsEarned: player.pointsEarned,
+          doorsOpened: player.doorsOpened,
+          crateRolls: player.crateRolls,
+        };
         local = {
           x: player.x,
           y: player.y,
@@ -332,7 +383,19 @@ export class CoopClient {
       stateTimeMs: enemy.stateTimeMs,
       spawnProgress: enemy.spawnProgress,
     }));
+    const grenades: NetworkGrenadeView[] = [];
+    state.grenades?.forEach((grenade) => grenades.push({
+      id: grenade.id,
+      ownerId: grenade.ownerId,
+      x: grenade.x,
+      y: grenade.y,
+      z: grenade.z,
+      fuseRemainingMs: grenade.fuseRemainingMs,
+    }));
+    const openDoors: string[] = [];
+    state.openDoors?.forEach((doorId) => openDoors.push(doorId));
     this.simulationListener({
+      localPlayerId: room.sessionId,
       round: state.round,
       elapsedMs: state.simulationTimeMs,
       spawned: state.spawned,
@@ -341,6 +404,18 @@ export class CoopClient {
       phase: state.phase,
       barriers,
       enemies,
+      grenades,
+      openDoors,
+      crate: {
+        activeLocationId: state.crateLocationId,
+        phase: normalizeCratePhase(state.cratePhase),
+        purchaserId: state.cratePurchaserId,
+        weaponId: state.crateWeaponId === '' ? '' : normalizeWeaponId(state.crateWeaponId),
+        pendingPuppe: state.cratePendingPuppe,
+        spinRemainingMs: state.crateSpinRemainingMs,
+        grabRemainingMs: state.crateGrabRemainingMs,
+        usesAtLocation: state.crateUsesAtLocation,
+      },
       localHp,
       localMaxHp,
       localPoints,
@@ -348,6 +423,7 @@ export class CoopClient {
       localActiveWeaponIndex,
       localReloading,
       localReloadRemainingMs,
+      localGrenades,
       localStats,
     });
   }
@@ -355,4 +431,8 @@ export class CoopClient {
 
 function normalizeWeaponId(value: string): WeaponId {
   return Object.prototype.hasOwnProperty.call(CONFIG.weapons, value) ? value as WeaponId : 'melder';
+}
+
+function normalizeCratePhase(value: string): NetworkCrateView['phase'] {
+  return value === 'spinning' || value === 'available' ? value : 'closed';
 }

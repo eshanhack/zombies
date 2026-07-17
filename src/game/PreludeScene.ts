@@ -1,10 +1,10 @@
 import * as THREE from 'three';
 import { CONFIG, type WeaponId } from '../config.js';
 import { AudioSystem } from '../audio/AudioSystem.js';
-import { DOORS, START_POSITIONS, WINDOWS } from '../map/blueprint.js';
+import { CRATE_LOCATIONS, DOORS, START_POSITIONS, WALL_BUYS, WINDOWS } from '../map/blueprint.js';
 import { SeededRng } from '../shared/rng.js';
 import type { MovementInput } from '../shared/movement.js';
-import { GameSimulation, type SimPlayer } from '../shared/GameSimulation.js';
+import { GameSimulation, type SimCrateState, type SimGrenade, type SimPlayer } from '../shared/GameSimulation.js';
 import { type CombatPlayerState, type FireResult, type RuntimeWeaponState } from '../shared/combat.js';
 import { BunkerMap } from './BunkerMap.js';
 import { EnemyRenderer, type EnemyVisualState } from './EnemyRenderer.js';
@@ -48,6 +48,11 @@ export interface SceneSimulationReadout {
   reloading: boolean;
   reloadRemainingMs: number;
   stats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number };
+  grenades: number;
+  thrownGrenades: readonly Pick<SimGrenade, 'id' | 'ownerId' | 'x' | 'y' | 'z' | 'fuseRemainingMs'>[];
+  openDoors: readonly string[];
+  crate: Readonly<SimCrateState>;
+  localPlayerId: string;
   barriers: readonly { id: string; room: string; boards: number; repairProgressMs: number }[];
   enemies: readonly SceneEnemyReadout[];
 }
@@ -113,7 +118,10 @@ export class PreludeScene {
   private viewmodelRecoilM = 0;
   private muzzleRemainingMs = 0;
   private nextCosmeticFireAtMs = 0;
+  private fireHeld = false;
+  private grenadeCookStartedAtMs = -1;
   private hudEventSequence = 0;
+  private debugWeaponIndex = 0;
   private readonly hudEvents: HudEvent[] = [];
   private godMode = false;
   private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0 };
@@ -206,7 +214,8 @@ export class PreludeScene {
       sendInput: options.sendInput,
       onMelee: this.handleMelee,
       onInteractChange: this.handleInteractChange,
-      onFire: this.handleFire,
+      onFireChange: this.handleFireChange,
+      onGrenadeChange: this.handleGrenadeChange,
       onReload: this.handleReload,
       onSwitchWeapon: this.handleSwitchWeapon,
     });
@@ -293,6 +302,14 @@ export class PreludeScene {
       this.ensureViewmodelWeapon('jaeger');
       return true;
     }
+    if (name === 'arsenal') {
+      const weapons = ['melder', 'jaeger', 'kurier', 'sturmvogel', 'doppelhieb', 'lasttraeger', 'richter', 'grabenfeger', 'fernblick', 'kettenhund'] as const;
+      this.debugWeaponIndex = (this.debugWeaponIndex + 1) % weapons.length;
+      const weaponId = weapons[this.debugWeaponIndex] ?? 'melder';
+      this.simulation.grantWeapon(this.soloPlayer.id, weaponId);
+      this.ensureViewmodelWeapon(weaponId);
+      return true;
+    }
     if (name === 'target') {
       const enemy = this.simulation.forceSpawn([this.soloPlayer])
         ?? [...this.simulation.enemies.values()]
@@ -337,6 +354,11 @@ export class PreludeScene {
         reloading: combat.reloadingWeaponIndex >= 0,
         reloadRemainingMs: combat.reloadingWeaponIndex >= 0 ? Math.max(0, combat.reloadFinishAtMs - this.simulation.elapsedMs) : 0,
         stats: combatStats(combat),
+        grenades: combat.grenades,
+        thrownGrenades: [...this.simulation.grenades.values()],
+        openDoors: [...this.simulation.openDoors],
+        crate: this.simulation.crate,
+        localPlayerId: this.soloPlayer.id,
         barriers: [...this.simulation.barriers.values()],
         enemies: [...this.simulation.enemies.values()].map(toEnemyVisual),
       };
@@ -358,6 +380,11 @@ export class PreludeScene {
         reloading: network.localReloading,
         reloadRemainingMs: network.localReloadRemainingMs,
         stats: network.localStats,
+        grenades: network.localGrenades,
+        thrownGrenades: network.grenades,
+        openDoors: network.openDoors,
+        crate: network.crate,
+        localPlayerId: network.localPlayerId,
         barriers: network.barriers,
         enemies: network.enemies.map(toEnemyVisual),
       };
@@ -369,15 +396,45 @@ export class PreludeScene {
     const controller = this.controller?.getReadout();
     const readout = this.getSimulationReadout();
     if (controller === undefined || controller === null || readout === null) return null;
+    if (this.simulation !== null && this.soloPlayer !== null) {
+      this.syncSoloPose(controller);
+      return this.simulation.getInteractionTarget(this.soloPlayer)?.prompt ?? null;
+    }
+    const candidates: { distance: number; prompt: string }[] = [];
+    const add = (distance: number, prompt: string): void => {
+      if (distance <= CONFIG.controller.interactionRangeM) candidates.push({ distance, prompt });
+    };
     for (const barrier of readout.barriers) {
       if (barrier.boards >= CONFIG.barriers.boardSlots) continue;
       const window = WINDOWS.find((candidate) => candidate.id === barrier.id);
-      if (window === undefined) continue;
-      if (Math.hypot(controller.x - window.insideX, controller.z - window.insideZ) <= CONFIG.controller.interactionRangeM) {
-        return 'Hold F to rebuild barrier';
+      if (window !== undefined) add(Math.hypot(controller.x - window.insideX, controller.z - window.insideZ), 'Hold F to rebuild barrier');
+    }
+    for (const door of DOORS) {
+      if (readout.openDoors.includes(door.id)) continue;
+      add(Math.hypot(
+        controller.x - (door.collider.minX + door.collider.maxX) * 0.5,
+        controller.z - (door.collider.minZ + door.collider.maxZ) * 0.5,
+      ), `Hold F to buy Door [Cost: ${door.cost}]`);
+    }
+    for (const wall of WALL_BUYS) {
+      const distance = Math.hypot(controller.x - wall.x, controller.y + CONFIG.controller.eyeHeightM - wall.y, controller.z - wall.z);
+      if (wall.kind === 'grenades') add(distance, `Hold F for Frag Grenades ×4 [Cost: ${wall.cost}]`);
+      else if (wall.weaponId !== undefined) {
+        const owned = readout.weapons.some((weapon) => weapon.id === wall.weaponId);
+        const cost = owned ? Math.round(wall.cost * CONFIG.economy.wallAmmoFactor) : wall.cost;
+        add(distance, `Hold F for ${CONFIG.weapons[wall.weaponId].name}${owned ? ' Ammo' : ''} [Cost: ${cost}]`);
       }
     }
-    return null;
+    const crate = CRATE_LOCATIONS.find((location) => location.id === readout.crate.activeLocationId);
+    if (crate !== undefined) {
+      const distance = Math.hypot(controller.x - crate.x, controller.y - crate.y, controller.z - crate.z);
+      if (readout.crate.phase === 'closed') add(distance, `Hold F for Mystery Crate [Cost: ${CONFIG.economy.mysteryCrate}]`);
+      if (readout.crate.phase === 'available' && readout.crate.purchaserId === readout.localPlayerId && readout.crate.weaponId !== '') {
+        add(distance, `Hold F to take ${CONFIG.weapons[readout.crate.weaponId].name}`);
+      }
+    }
+    candidates.sort((left, right) => left.distance - right.distance);
+    return candidates[0]?.prompt ?? null;
   }
 
   isGameplay(): boolean {
@@ -495,44 +552,94 @@ export class PreludeScene {
     const metal = new THREE.MeshStandardMaterial({ color: 0x242827, roughness: 0.46, metalness: 0.74 });
     const darkMetal = new THREE.MeshStandardMaterial({ color: 0x111413, roughness: 0.58, metalness: 0.66 });
     const grip = new THREE.MeshStandardMaterial({ color: 0x4a3728, roughness: 0.82 });
-    if (weaponId === 'jaeger') {
-      const stock = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.72), grip);
-      stock.position.set(0, -0.06, 0.05);
-      stock.rotation.x = -0.04;
-      group.add(stock);
-      const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.13, 0.34), metal);
-      receiver.position.set(0, 0.025, -0.35);
-      group.add(receiver);
-      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.028, 0.72, 12), darkMetal);
-      barrel.rotation.x = Math.PI / 2;
-      barrel.position.set(0, 0.04, -0.83);
-      group.add(barrel);
-      const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.18, 10), metal);
-      bolt.rotation.z = Math.PI / 2;
-      bolt.position.set(0.14, 0.095, -0.29);
-      group.add(bolt);
-      const rearSight = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.055, 0.035), darkMetal);
-      rearSight.position.set(0, 0.12, -0.25);
-      group.add(rearSight);
-      const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.06, 0.025), darkMetal);
-      frontSight.position.set(0, 0.11, -1.12);
-      group.add(frontSight);
+    const addBox = (size: [number, number, number], position: [number, number, number], material: THREE.Material = metal): THREE.Mesh => {
+      const mesh = new THREE.Mesh(new THREE.BoxGeometry(...size), material);
+      mesh.position.set(...position);
+      group.add(mesh);
+      return mesh;
+    };
+    const addBarrel = (radius: number, length: number, position: [number, number, number], material: THREE.Material = darkMetal): THREE.Mesh => {
+      const mesh = new THREE.Mesh(new THREE.CylinderGeometry(radius * 0.78, radius, length, 12), material);
+      mesh.rotation.x = Math.PI / 2;
+      mesh.position.set(...position);
+      group.add(mesh);
+      return mesh;
+    };
+    const addScope = (position: [number, number, number], length: number): void => {
+      addBarrel(0.055, length, position, darkMetal);
+      addBox([0.018, 0.08, 0.018], [-0.065, position[1] - 0.045, position[2] + 0.07], metal);
+      addBox([0.018, 0.08, 0.018], [0.065, position[1] - 0.045, position[2] + 0.07], metal);
+    };
+    const addLongGun = (barrelLength: number, stockLength: number, magazine: 'box' | 'drum' | 'none' = 'box'): void => {
+      addBox([0.18, 0.16, stockLength], [0, -0.06, 0.08], grip).rotation.x = -0.04;
+      addBox([0.16, 0.15, 0.38], [0, 0.025, -0.34]);
+      addBarrel(0.026, barrelLength, [0, 0.04, -0.55 - barrelLength * 0.5]);
+      if (magazine === 'box') addBox([0.13, 0.25, 0.15], [0, -0.17, -0.31], darkMetal).rotation.x = 0.12;
+      if (magazine === 'drum') {
+        const drum = new THREE.Mesh(new THREE.CylinderGeometry(0.14, 0.14, 0.1, 16), darkMetal);
+        drum.rotation.z = Math.PI / 2;
+        drum.position.set(0, -0.1, -0.3);
+        group.add(drum);
+      }
+      addBox([0.018, 0.065, 0.025], [0, 0.12, -0.52 - barrelLength]);
+    };
+
+    if (weaponId === 'melder') {
+      addBox([0.11, 0.1, 0.47], [0, 0, -0.09]);
+      addBarrel(0.03, 0.32, [0, 0.005, -0.34]);
+      addBox([0.1, 0.24, 0.13], [0, -0.14, 0.08], grip).rotation.x = -0.2;
+      addBox([0.018, 0.035, 0.035], [0, 0.067, -0.25], darkMetal);
+    } else if (weaponId === 'jaeger') {
+      addLongGun(0.72, 0.72, 'none');
+      const bolt = addBarrel(0.018, 0.18, [0.14, 0.095, -0.29], metal);
+      bolt.rotation.set(0, 0, Math.PI / 2);
+      addBox([0.08, 0.055, 0.035], [0, 0.12, -0.25], darkMetal);
       group.scale.setScalar(CONFIG.rendering.viewmodel.jagerScale);
+    } else if (weaponId === 'kurier') {
+      addLongGun(0.54, 0.58, 'box');
+      addBox([0.1, 0.06, 0.26], [0, 0.11, -0.18], grip);
+      group.scale.setScalar(1.05);
+    } else if (weaponId === 'sturmvogel') {
+      addBox([0.18, 0.18, 0.52], [0, 0, -0.23]);
+      addBarrel(0.034, 0.38, [0, 0.02, -0.68]);
+      addBox([0.13, 0.34, 0.14], [0, -0.22, -0.24], darkMetal).rotation.x = -0.08;
+      addBox([0.12, 0.28, 0.12], [0, -0.17, 0.08], grip).rotation.x = -0.24;
+    } else if (weaponId === 'doppelhieb') {
+      addBox([0.22, 0.18, 0.78], [0, -0.07, 0.02], grip);
+      addBarrel(0.037, 0.82, [-0.044, 0.055, -0.72]);
+      addBarrel(0.037, 0.82, [0.044, 0.055, -0.72]);
+      addBox([0.17, 0.18, 0.2], [0, 0.015, -0.32], metal);
+      group.scale.setScalar(1.08);
+    } else if (weaponId === 'lasttraeger') {
+      addLongGun(0.64, 0.58, 'drum');
+      addBox([0.2, 0.08, 0.4], [0, 0.15, -0.31], darkMetal);
+      addBarrel(0.012, 0.48, [-0.12, -0.11, -0.73], metal).rotation.z = -0.22;
+      addBarrel(0.012, 0.48, [0.12, -0.11, -0.73], metal).rotation.z = 0.22;
+    } else if (weaponId === 'richter') {
+      addBox([0.13, 0.12, 0.31], [0, 0.01, -0.17]);
+      addBarrel(0.037, 0.48, [0, 0.025, -0.54]);
+      const cylinder = addBarrel(0.095, 0.15, [0, -0.005, -0.15], metal);
+      cylinder.rotation.set(0, 0, Math.PI / 2);
+      addBox([0.12, 0.3, 0.14], [0, -0.18, 0.04], grip).rotation.x = -0.24;
+    } else if (weaponId === 'grabenfeger') {
+      addBox([0.19, 0.17, 0.7], [0, -0.07, 0.05], grip);
+      addBarrel(0.038, 0.83, [0, 0.06, -0.76]);
+      addBarrel(0.026, 0.7, [0, -0.025, -0.72], metal);
+      addBox([0.21, 0.18, 0.31], [0, -0.02, -0.63], grip);
+    } else if (weaponId === 'fernblick') {
+      addLongGun(0.78, 0.7, 'none');
+      addScope([0, 0.19, -0.46], 0.56);
+      group.scale.setScalar(1.12);
+    } else if (weaponId === 'kettenhund') {
+      addLongGun(0.7, 0.52, 'box');
+      addBox([0.24, 0.24, 0.5], [0.25, -0.12, -0.28], darkMetal);
+      addBox([0.22, 0.1, 0.45], [0, 0.17, -0.31], metal);
+      addBarrel(0.012, 0.52, [-0.13, -0.11, -0.8], metal).rotation.z = -0.2;
+      addBarrel(0.012, 0.52, [0.13, -0.11, -0.8], metal).rotation.z = 0.2;
+      group.scale.setScalar(1.08);
     } else {
-      const slide = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.1, 0.47), metal);
-      slide.position.z = -0.09;
-      group.add(slide);
-      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.32, 12), darkMetal);
-      barrel.rotation.x = Math.PI / 2;
-      barrel.position.set(0, 0.005, -0.34);
-      group.add(barrel);
-      const handle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 0.13), grip);
-      handle.position.set(0, -0.14, 0.08);
-      handle.rotation.x = -0.2;
-      group.add(handle);
-      const sight = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.035, 0.035), darkMetal);
-      sight.position.set(0, 0.067, -0.25);
-      group.add(sight);
+      addBox([0.2, 0.18, 0.62], [0, 0, -0.3], new THREE.MeshStandardMaterial({ color: CONFIG.weapons[weaponId].color, emissive: CONFIG.weapons[weaponId].color, emissiveIntensity: 0.24 }));
+      addBarrel(0.035, 0.55, [0, 0.02, -0.85]);
     }
     const sleeve = new THREE.MeshStandardMaterial({ color: 0x343b36, roughness: 0.94 });
     const leftArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.34, 4, 8), sleeve);
@@ -554,7 +661,8 @@ export class PreludeScene {
     group.position.set(hip[0], hip[1], hip[2]);
     const muzzleOffset = CONFIG.rendering.viewmodel.muzzleOffset;
     this.muzzleLight = new THREE.PointLight(0xffb15a, 0, CONFIG.rendering.muzzleLightDistanceM, 2);
-    this.muzzleLight.position.set(muzzleOffset[0], muzzleOffset[1], weaponId === 'jaeger' ? muzzleOffset[2] * CONFIG.rendering.viewmodel.jagerScale : muzzleOffset[2]);
+    const bounds = new THREE.Box3().setFromObject(group);
+    this.muzzleLight.position.set(muzzleOffset[0], muzzleOffset[1], Math.min(muzzleOffset[2], bounds.min.z));
     group.add(this.muzzleLight);
     return group;
   }
@@ -613,6 +721,15 @@ export class PreludeScene {
     }
     controller.applyCamera(this.camera);
     this.gameplayElapsed += delta;
+    if (this.fireHeld) {
+      const simulation = this.getSimulationReadout();
+      const weapon = simulation?.weapons[simulation.activeWeaponIndex];
+      if (weapon !== undefined && CONFIG.weapons[weapon.id].automatic) this.fireWeapon(false);
+    }
+    if (this.grenadeCookStartedAtMs >= 0
+      && this.gameplayElapsed * 1000 - this.grenadeCookStartedAtMs >= CONFIG.combat.grenadeFuseMs) {
+      this.releaseGrenade(CONFIG.combat.grenadeFuseMs);
+    }
     this.meleeAnimationRemainingMs = Math.max(0, this.meleeAnimationRemainingMs - delta * 1000);
     this.reloadAnimationRemainingMs = Math.max(0, this.reloadAnimationRemainingMs - delta * 1000);
     this.muzzleRemainingMs = Math.max(0, this.muzzleRemainingMs - delta * 1000);
@@ -670,16 +787,24 @@ export class PreludeScene {
     if (readout === null) return;
     this.enemyRenderer?.update(readout.enemies);
     this.bunkerMap?.updateBarriers(readout.barriers);
+    for (const door of DOORS) this.bunkerMap?.setDoorOpen(door.id, readout.openDoors.includes(door.id));
+    this.bunkerMap?.updateCrate(readout.crate, readout.elapsedMs);
+    this.bunkerMap?.updateGrenades(readout.thrownGrenades);
   }
 
-  private readonly handleFire = (): void => {
+  private readonly handleFireChange = (held: boolean): void => {
+    this.fireHeld = held;
+    if (held) this.fireWeapon(true);
+  };
+
+  private fireWeapon(playEmpty: boolean): void {
     const controllerReadout = this.controller?.getReadout();
     const simulationReadout = this.getSimulationReadout();
     if (controllerReadout === undefined || controllerReadout === null || simulationReadout === null) return;
     const weapon = simulationReadout.weapons[simulationReadout.activeWeaponIndex];
     if (weapon === undefined) return;
     if (simulationReadout.reloading || weapon.magazine <= 0) {
-      this.audio.playEmpty();
+      if (playEmpty) this.audio.playEmpty();
       return;
     }
 
@@ -695,12 +820,12 @@ export class PreludeScene {
     this.syncSoloPose(controllerReadout);
     const result = this.simulation.fire(this.soloPlayer, controllerReadout.ads);
     if (!result.accepted) {
-      if (result.reason === 'empty') this.audio.playEmpty();
+      if (result.reason === 'empty' && playEmpty) this.audio.playEmpty();
       return;
     }
     this.playLocalShot(result.weaponId);
     this.processFireResult(result);
-  };
+  }
 
   private readonly handleReload = (): void => {
     const readout = this.getSimulationReadout();
@@ -724,6 +849,7 @@ export class PreludeScene {
     if (this.gameMode === 'coop') this.sendAction?.({ type: 'switch', index });
     else if (this.soloPlayer !== null && !this.simulation?.switchWeapon(this.soloPlayer.id, index)) return;
     this.reloadAnimationRemainingMs = 0;
+    this.nextCosmeticFireAtMs = this.gameplayElapsed * 1000 + CONFIG.controller.weaponSwitchMs;
     this.ensureViewmodelWeapon(readout.weapons[index]!.id);
   };
 
@@ -745,6 +871,7 @@ export class PreludeScene {
   private processSoloEvents(events: ReturnType<GameSimulation['drainEvents']>): void {
     for (const event of events) {
       if (event.type === 'boardRepaired') this.recordPoints(event.points, 'barrier repair');
+      if (event.type === 'pointTransaction') this.recordPoints(event.amount, event.reason);
       if (event.type === 'playerDamaged') this.recordDamage(event.damage, event.enemyId);
     }
   }
@@ -807,11 +934,37 @@ export class PreludeScene {
 
   private readonly handleInteractChange = (held: boolean): void => {
     if (this.gameMode === 'coop') {
-      this.sendAction?.({ type: 'repair', held });
+      this.sendAction?.({ type: 'interact', held });
       return;
     }
-    if (this.soloPlayer !== null) this.simulation?.setRepairHeld(this.soloPlayer.id, held);
+    if (this.soloPlayer !== null) {
+      this.simulation?.setRepairHeld(this.soloPlayer.id, held);
+      this.simulation?.setInteractionHeld(this.soloPlayer.id, held);
+    }
   };
+
+  private readonly handleGrenadeChange = (held: boolean): void => {
+    if (held) {
+      if (this.grenadeCookStartedAtMs < 0 && (this.getSimulationReadout()?.grenades ?? 0) > 0) {
+        this.grenadeCookStartedAtMs = this.gameplayElapsed * 1000;
+      }
+      return;
+    }
+    if (this.grenadeCookStartedAtMs < 0) return;
+    this.releaseGrenade(this.gameplayElapsed * 1000 - this.grenadeCookStartedAtMs);
+  };
+
+  private releaseGrenade(cookedMs: number): void {
+    this.grenadeCookStartedAtMs = -1;
+    if (this.gameMode === 'coop') {
+      this.sendAction?.({ type: 'grenade', cookedMs: Math.min(CONFIG.combat.grenadeFuseMs, Math.max(0, cookedMs)) });
+      return;
+    }
+    const readout = this.controller?.getReadout();
+    if (readout === undefined || this.soloPlayer === null || this.simulation === null) return;
+    this.syncSoloPose(readout);
+    this.simulation.throwGrenade(this.soloPlayer, cookedMs);
+  }
 
   private readonly render = (timestamp: number): void => {
     this.timer.update(timestamp);

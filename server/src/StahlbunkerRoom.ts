@@ -9,9 +9,9 @@ import {
   simulatePlayerMovement,
   type MovementInput,
 } from '../../src/shared/movement.js';
-import { GameSimulation, type SimBarrier, type SimEnemy, type SimulationEvent } from '../../src/shared/GameSimulation.js';
+import { GameSimulation, type SimBarrier, type SimEnemy, type SimGrenade, type SimulationEvent } from '../../src/shared/GameSimulation.js';
 import type { CombatPlayerState } from '../../src/shared/combat.js';
-import { BunkerState, NetBarrier, NetEnemy, NetPlayer, NetWeapon } from './schema.js';
+import { BunkerState, NetBarrier, NetEnemy, NetGrenade, NetPlayer, NetWeapon } from './schema.js';
 
 interface JoinOptions {
   name?: string;
@@ -19,10 +19,20 @@ interface JoinOptions {
 }
 
 interface ActionMessage {
-  type: 'melee' | 'repair' | 'fire' | 'reload' | 'switch';
+  type: 'melee' | 'repair' | 'interact' | 'fire' | 'reload' | 'switch' | 'grenade';
   held?: boolean;
   ads?: boolean;
   index?: number;
+  cookedMs?: number;
+}
+
+interface GateMessage {
+  version: number;
+  type: 'grantPoints' | 'teleport' | 'grantWeapon';
+  x?: number;
+  y?: number;
+  z?: number;
+  weaponId?: string;
 }
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -48,6 +58,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
   private readonly latestInputs = new Map<string, MovementInput>();
   private readonly collisionWorld = createCollisionWorld();
   private simulation: GameSimulation | null = null;
+  private simulationAccumulatorMs = 0;
 
   onCreate(): void {
     const seed = randomBytes(4).readUInt32LE(0);
@@ -61,21 +72,28 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       this.state.serverTimeMs += deltaMs;
       if (!this.state.started) return;
       const players = [...this.state.players.values()].filter((player) => player.connected && !player.spectating && !player.downed);
-      for (const player of players) {
-        const input = this.latestInputs.get(player.id);
-        if (input === undefined) continue;
-        simulatePlayerMovement(player, input, 1 / CONFIG.simulation.hz, this.collisionWorld);
-        player.yaw = input.yaw;
-        player.pitch = input.pitch;
-        player.lastProcessedInput = input.sequence;
-      }
-      resolvePlayerSeparation(players);
       const simulation = this.simulation;
-      if (simulation !== null) {
-        simulation.update(1000 / CONFIG.simulation.hz, players);
+      if (simulation === null) return;
+      const fixedDeltaMs = 1000 / CONFIG.simulation.hz;
+      this.simulationAccumulatorMs += Math.min(deltaMs, CONFIG.simulation.maxFrameDeltaMs);
+      let subSteps = 0;
+      while (this.simulationAccumulatorMs >= fixedDeltaMs && subSteps < CONFIG.simulation.maxSubSteps) {
+        for (const player of players) {
+          const input = this.latestInputs.get(player.id);
+          if (input === undefined) continue;
+          simulatePlayerMovement(player, input, 1 / CONFIG.simulation.hz, this.collisionWorld);
+          player.yaw = input.yaw;
+          player.pitch = input.pitch;
+          player.lastProcessedInput = input.sequence;
+        }
+        resolvePlayerSeparation(players);
+        simulation.update(fixedDeltaMs, players);
         this.publishSimulationEvents(simulation.drainEvents());
-        this.syncSimulation(simulation);
+        this.simulationAccumulatorMs -= fixedDeltaMs;
+        subSteps += 1;
       }
+      if (subSteps === CONFIG.simulation.maxSubSteps) this.simulationAccumulatorMs = Math.min(this.simulationAccumulatorMs, fixedDeltaMs);
+      this.syncSimulation(simulation);
     }, 1000 / CONFIG.simulation.hz);
 
     this.onMessage('ready', (client, ready: boolean) => {
@@ -87,6 +105,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       this.state.started = true;
       this.state.phase = 'playing';
       this.simulation = new GameSimulation({ seed: this.state.seed, mode: 'coop', rosterSize: this.state.players.size });
+      this.simulationAccumulatorMs = 0;
       this.syncSimulation(this.simulation);
       this.lock();
       this.broadcast('runStarted', { seed: this.state.seed, roster: this.state.players.size });
@@ -110,7 +129,10 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         client.send('combatFeedback', { source: 'melee', ...result });
         if (result.points > 0) this.logPointTransaction(player.id, result.points, 'melee kill');
       }
-      if (action.type === 'repair') simulation.setRepairHeld(client.sessionId, action.held === true);
+      if (action.type === 'repair' || action.type === 'interact') {
+        simulation.setRepairHeld(client.sessionId, action.held === true);
+        simulation.setInteractionHeld(client.sessionId, action.held === true);
+      }
       if (action.type === 'fire') {
         const result = simulation.fire(player, action.ads === true);
         client.send('combatFeedback', { source: 'fire', ...result });
@@ -118,9 +140,37 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       }
       if (action.type === 'reload') client.send('reloadFeedback', simulation.requestReload(player.id));
       if (action.type === 'switch' && Number.isInteger(action.index)) simulation.switchWeapon(player.id, action.index ?? -1);
+      if (action.type === 'grenade') simulation.throwGrenade(player, Number.isFinite(action.cookedMs) ? action.cookedMs ?? 0 : 0);
       this.syncSimulation(simulation);
     });
     this.onMessage('ping', (client, sentAt: number) => client.send('pong', sentAt));
+    this.onMessage('gate', (client, message: GateMessage) => {
+      if (process.env.NODE_ENV === 'production' || message?.version !== CONFIG.debug.apiVersion) {
+        client.send('gateAck', { accepted: false });
+        return;
+      }
+      const player = this.state.players.get(client.sessionId);
+      const simulation = this.simulation;
+      if (player === undefined || simulation === null) return;
+      if (message.type === 'grantPoints') player.points += CONFIG.debug.gatePointGrant;
+      if (message.type === 'teleport' && Number.isFinite(message.x) && Number.isFinite(message.y) && Number.isFinite(message.z)) {
+        player.x = message.x ?? player.x;
+        player.y = message.y ?? player.y;
+        player.z = message.z ?? player.z;
+        player.vx = 0;
+        player.vy = 0;
+        player.vz = 0;
+      }
+      if (message.type === 'grantWeapon' && typeof message.weaponId === 'string'
+        && Object.prototype.hasOwnProperty.call(CONFIG.weapons, message.weaponId)) {
+        const combat = simulation.grantWeapon(player.id, message.weaponId as keyof typeof CONFIG.weapons);
+        combat.switchReadyAtMs = simulation.elapsedMs;
+        const weapon = combat.weapons[combat.activeWeaponIndex];
+        if (weapon !== undefined) weapon.readyAtMs = simulation.elapsedMs;
+      }
+      this.syncSimulation(simulation);
+      client.send('gateAck', { accepted: true, type: message.type });
+    });
   }
 
   onJoin(client: Client, options: JoinOptions): void {
@@ -142,6 +192,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.latestInputs.delete(client.sessionId);
     this.inputSequences.delete(client.sessionId);
     this.simulation?.setRepairHeld(client.sessionId, false);
+    this.simulation?.setInteractionHeld(client.sessionId, false);
     const player = this.state.players.get(client.sessionId);
     if (player !== undefined) player.connected = false;
     if (!this.state.started) {
@@ -156,6 +207,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.inputSequences.clear();
     this.latestInputs.clear();
     this.simulation = null;
+    this.simulationAccumulatorMs = 0;
   }
 
   private syncSimulation(simulation: GameSimulation): void {
@@ -173,6 +225,28 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     for (const enemy of simulation.enemies.values()) this.syncEnemy(enemy);
     const activeEnemyIds = new Set([...simulation.enemies.keys()].map(String));
     for (const id of this.state.enemies.keys()) if (!activeEnemyIds.has(id)) this.state.enemies.delete(id);
+
+    const doorIds = [...simulation.openDoors].sort();
+    if (doorIds.length !== this.state.openDoors.length || doorIds.some((id, index) => this.state.openDoors[index] !== id)) {
+      this.state.openDoors.splice(0, this.state.openDoors.length);
+      for (const doorId of doorIds) this.state.openDoors.push(doorId);
+    }
+    const collisionDoors = this.collisionWorld.openDoors as Set<string>;
+    collisionDoors.clear();
+    for (const id of doorIds) collisionDoors.add(id);
+
+    this.state.crateLocationId = simulation.crate.activeLocationId;
+    this.state.cratePhase = simulation.crate.phase;
+    this.state.cratePurchaserId = simulation.crate.purchaserId;
+    this.state.crateWeaponId = simulation.crate.weaponId;
+    this.state.cratePendingPuppe = simulation.crate.pendingPuppe;
+    this.state.crateSpinRemainingMs = simulation.crate.spinRemainingMs;
+    this.state.crateGrabRemainingMs = simulation.crate.grabRemainingMs;
+    this.state.crateUsesAtLocation = simulation.crate.usesAtLocation;
+
+    for (const grenade of simulation.grenades.values()) this.syncGrenade(grenade);
+    const activeGrenadeIds = new Set([...simulation.grenades.keys()].map(String));
+    for (const id of this.state.grenades.keys()) if (!activeGrenadeIds.has(id)) this.state.grenades.delete(id);
     for (const player of this.state.players.values()) this.syncCombatPlayer(player, simulation.getCombatState(player.id), simulation.elapsedMs);
   }
 
@@ -202,6 +276,9 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     player.kills = source.kills;
     player.headshots = source.headshots;
     player.pointsEarned = source.pointsEarned;
+    player.doorsOpened = source.doorsOpened;
+    player.crateRolls = source.crateRolls;
+    player.grenades = source.grenades;
   }
 
   private publishSimulationEvents(events: readonly SimulationEvent[]): void {
@@ -212,6 +289,10 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       }
       if (event.type === 'playerDamaged') {
         this.clientBySessionId(event.playerId)?.send('damageFeedback', { amount: event.damage, enemyId: event.enemyId });
+      }
+      if (event.type === 'pointTransaction') {
+        this.clientBySessionId(event.playerId)?.send('pointTransaction', { amount: event.amount, reason: event.reason });
+        this.logPointTransaction(event.playerId, event.amount, event.reason);
       }
     }
   }
@@ -259,5 +340,20 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     target.targetPlayerId = source.targetPlayerId;
     target.stateTimeMs = source.stateTimeMs;
     target.spawnProgress = source.spawnProgress;
+  }
+
+  private syncGrenade(source: SimGrenade): void {
+    const key = String(source.id);
+    let target = this.state.grenades.get(key);
+    if (target === undefined) {
+      target = new NetGrenade();
+      target.id = source.id;
+      this.state.grenades.set(key, target);
+    }
+    target.ownerId = source.ownerId;
+    target.x = source.x;
+    target.y = source.y;
+    target.z = source.z;
+    target.fuseRemainingMs = source.fuseRemainingMs;
   }
 }

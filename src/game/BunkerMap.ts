@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
-import { DOORS, FLOOR_ZONES, STATIC_COLLIDERS, WINDOWS, type AabbCollider } from '../map/blueprint.js';
+import { CRATE_LOCATIONS, DOORS, FLOOR_ZONES, STATIC_COLLIDERS, WALL_BUYS, WINDOWS, type AabbCollider } from '../map/blueprint.js';
 import { NAV_NODES, NAV_NODE_BY_ID } from '../map/navgraph.js';
 import type { CollisionWorld } from '../shared/movement.js';
 
@@ -10,7 +10,9 @@ export class BunkerMap {
   private readonly openDoors = new Set<string>();
   private readonly doorMeshes = new Map<string, THREE.Mesh>();
   private readonly navDebug = new THREE.Group();
+  private readonly crateVisuals = new Map<string, { group: THREE.Group; lid: THREE.Mesh; shaft: THREE.Mesh; weapon: THREE.Mesh }>();
   private boardInstances: THREE.InstancedMesh | null = null;
+  private grenadeInstances: THREE.InstancedMesh | null = null;
 
   constructor() {
     this.group.name = 'stahlbunker-map';
@@ -60,6 +62,47 @@ export class BunkerMap {
       }
     }
     instances.count = instanceIndex;
+    instances.instanceMatrix.needsUpdate = true;
+  }
+
+  updateCrate(
+    crate: { activeLocationId: string; phase: 'closed' | 'spinning' | 'available'; weaponId: string; pendingPuppe: boolean },
+    elapsedMs: number,
+  ): void {
+    const weaponIds = Object.keys(CONFIG.weapons) as (keyof typeof CONFIG.weapons)[];
+    for (const [locationId, visual] of this.crateVisuals) {
+      const active = locationId === crate.activeLocationId;
+      visual.group.visible = active;
+      if (!active) continue;
+      visual.lid.rotation.x = THREE.MathUtils.lerp(visual.lid.rotation.x, crate.phase === 'closed' ? 0 : -1.12, 0.16);
+      visual.shaft.visible = true;
+      (visual.shaft.material as THREE.MeshBasicMaterial).opacity = crate.phase === 'closed' ? 0.11 : 0.22;
+      const showRoll = crate.phase !== 'closed';
+      visual.weapon.visible = showRoll;
+      if (!showRoll) continue;
+      const cycleIndex = Math.floor(elapsedMs / (1000 / CONFIG.rendering.economyVisual.crateCycleHz)) % weaponIds.length;
+      const weaponId = crate.weaponId !== '' && crate.phase === 'available' ? crate.weaponId as keyof typeof CONFIG.weapons : weaponIds[cycleIndex] ?? 'richter';
+      const material = visual.weapon.material as THREE.MeshStandardMaterial;
+      material.color.setHex(crate.pendingPuppe ? 0x7a6050 : CONFIG.weapons[weaponId].color);
+      material.emissive.setHex(crate.pendingPuppe ? 0x351911 : CONFIG.rendering.economyVisual.crateBlue);
+      visual.weapon.position.y = 1.18 + Math.sin(elapsedMs * 0.0035) * 0.08;
+      visual.weapon.rotation.y = elapsedMs * 0.0017;
+    }
+  }
+
+  updateGrenades(grenades: readonly { x: number; y: number; z: number }[]): void {
+    const instances = this.grenadeInstances;
+    if (instances === null) return;
+    const dummy = new THREE.Object3D();
+    const count = Math.min(grenades.length, instances.instanceMatrix.count);
+    for (let index = 0; index < count; index += 1) {
+      const grenade = grenades[index]!;
+      dummy.position.set(grenade.x, grenade.y, grenade.z);
+      dummy.rotation.set(index * 0.7, index * 1.1, index * 0.4);
+      dummy.updateMatrix();
+      instances.setMatrixAt(index, dummy.matrix);
+    }
+    instances.count = count;
     instances.instanceMatrix.needsUpdate = true;
   }
 
@@ -118,6 +161,7 @@ export class BunkerMap {
     this.addCeiling(1, 13, 8, 17, CONFIG.map.generator.ceilingY, debris);
     this.buildWindowRecesses(steel);
     this.buildDoorLabels();
+    this.buildEconomyGeometry(steel);
   }
 
   private addFloor(minX: number, maxX: number, minZ: number, maxZ: number, y: number, material: THREE.Material): void {
@@ -194,6 +238,81 @@ export class BunkerMap {
       marker.position.set((collider.minX + collider.maxX) * 0.5, Math.max(1.4, collider.minY + 0.7), (collider.minZ + collider.maxZ) * 0.5);
       this.group.add(marker);
     }
+  }
+
+  private buildEconomyGeometry(steel: THREE.Material): void {
+    for (const wallBuy of WALL_BUYS) {
+      const canvas = document.createElement('canvas');
+      canvas.width = 512;
+      canvas.height = 192;
+      const context = canvas.getContext('2d');
+      if (context !== null) {
+        context.clearRect(0, 0, canvas.width, canvas.height);
+        context.strokeStyle = '#d8dfcb';
+        context.fillStyle = '#d8dfcb';
+        context.lineWidth = 5;
+        context.font = 'bold 39px serif';
+        context.textAlign = 'center';
+        context.strokeRect(13, 15, 486, 162);
+        const label = wallBuy.weaponId === undefined ? 'FRAG GRENADES ×4' : CONFIG.weapons[wallBuy.weaponId].name.toUpperCase();
+        context.fillText(label, 256, 82);
+        context.font = 'bold 30px monospace';
+        context.fillText(`${wallBuy.cost} PTS`, 256, 133);
+      }
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;
+      const material = new THREE.MeshBasicMaterial({ map: texture, transparent: true, opacity: 0.8, depthWrite: false });
+      const marker = new THREE.Mesh(new THREE.PlaneGeometry(1.58, 0.6), material);
+      marker.position.set(wallBuy.x, wallBuy.y, wallBuy.z);
+      marker.rotation.y = wallBuy.yaw;
+      marker.translateZ(0.025);
+      this.group.add(marker);
+    }
+
+    const crateWood = new THREE.MeshStandardMaterial({ color: 0x37271e, roughness: 0.88, metalness: 0.04 });
+    const crateTrim = new THREE.MeshStandardMaterial({ color: 0x3e4646, roughness: 0.56, metalness: 0.72 });
+    for (const location of CRATE_LOCATIONS) {
+      const group = new THREE.Group();
+      group.position.set(location.x, location.y, location.z);
+      group.rotation.y = location.yaw;
+      const base = new THREE.Mesh(new THREE.BoxGeometry(1.35, 0.58, 0.72), crateWood);
+      base.position.y = 0.34;
+      base.castShadow = true;
+      group.add(base);
+      const bands = new THREE.Mesh(new THREE.BoxGeometry(1.39, 0.12, 0.76), crateTrim);
+      bands.position.y = 0.42;
+      group.add(bands);
+      const lid = new THREE.Mesh(new THREE.BoxGeometry(1.38, 0.16, 0.76), crateWood);
+      lid.position.set(0, 0.72, -0.33);
+      lid.geometry.translate(0, 0, 0.33);
+      lid.castShadow = true;
+      group.add(lid);
+      const shaft = new THREE.Mesh(
+        new THREE.CylinderGeometry(0.42, 0.72, CONFIG.rendering.economyVisual.crateShaftHeightM, 16, 1, true),
+        new THREE.MeshBasicMaterial({ color: CONFIG.rendering.economyVisual.crateBlue, transparent: true, opacity: 0.12, depthWrite: false, side: THREE.DoubleSide }),
+      );
+      shaft.position.y = CONFIG.rendering.economyVisual.crateShaftHeightM * 0.5;
+      group.add(shaft);
+      const weapon = new THREE.Mesh(
+        new THREE.BoxGeometry(0.16, 0.14, 0.92),
+        new THREE.MeshStandardMaterial({ color: 0x58625d, emissive: CONFIG.rendering.economyVisual.crateBlue, emissiveIntensity: 0.65, roughness: 0.42, metalness: 0.65 }),
+      );
+      weapon.visible = false;
+      group.add(weapon);
+      group.visible = false;
+      this.crateVisuals.set(location.id, { group, lid, shaft, weapon });
+      this.group.add(group);
+    }
+
+    this.grenadeInstances = new THREE.InstancedMesh(
+      new THREE.CapsuleGeometry(CONFIG.combat.grenadeCollisionRadiusM, 0.12, 3, 6),
+      steel,
+      CONFIG.coop.maxPlayers * CONFIG.combat.maxGrenades,
+    );
+    this.grenadeInstances.count = 0;
+    this.grenadeInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.grenadeInstances.castShadow = true;
+    this.group.add(this.grenadeInstances);
   }
 
   private buildLighting(): void {

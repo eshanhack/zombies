@@ -13,13 +13,14 @@ export class AudioSystem {
     const context = this.ensureContext();
     const master = this.master;
     if (context === null || master === null) return;
-    const profile = weaponId === 'jaeger' ? CONFIG.audio.weaponProfiles.jaeger : CONFIG.audio.weaponProfiles.melder;
+    const profile = CONFIG.audio.weaponProfiles[weaponId];
+    const definition = CONFIG.weapons[weaponId];
     const now = context.currentTime;
     const duration = profile.noiseMs / 1000;
 
     const crack = context.createOscillator();
     const crackGain = context.createGain();
-    crack.type = weaponId === 'jaeger' ? 'square' : 'triangle';
+    crack.type = definition.pellets > 1 ? 'sawtooth' : definition.rpm < 100 ? 'square' : 'triangle';
     crack.frequency.setValueAtTime(profile.crackHz * 2.3, now);
     crack.frequency.exponentialRampToValueAtTime(profile.crackHz, now + duration);
     crackGain.gain.setValueAtTime(profile.gain, now);
