@@ -143,3 +143,28 @@ Status: passed
   - Distinct procedural quadruped wolf batches, authored fog-bank spawning, powered perk-machine emissives, physical breaker lever, spinning/blinking power-up geometry, downed/spectator overlays, and the co-op resume entry point are rendered production code rather than test-only state.
   - Production browser diagnostics reported offline cache `ready`, 60 FPS, 39 draw calls, and `Console errors: 0` throughout the exercised gate.
 - Authority/lifecycle evidence: the server owns all P5 state and rejects production mutations; gameplay pauses when every roster member disconnects, retains the locked room for ten minutes, and then disposes it. Colyseus cryptographic reconnection tokens are persisted under the versioned resume key; a reconnecting original cannot play until the next round boundary.
+
+## P6 — Forge and wonder weapons
+
+Status: passed
+
+- Timestamp: 2026-07-17T15:42:26+10:00
+- Implementation commit: `15a50434009e`
+- Browser seed: solo production `12345`; authoritative two-client room `AGCG2L`
+- Client count: 2 authoritative clients plus production-browser solo
+- Automated checks:
+  - `npm run check`: passed with zero TypeScript diagnostics; 10 files / 98 tests passed; production PWA client and authoritative server built successfully.
+  - Die Schmiede is power-gated and globally exclusive, debits exactly 5,000 points, locks combat for exactly 3,000 ms, and returns the same active weapon with damage ×2, configured spread tightening, a full reserve, and the `Über-` prefix.
+  - Small magazines measured exactly +100% (Jäger K-8: 5 → 10); large magazines measured exactly +50% (Sturmvogel: 32 → 48). Reload logic uses the upgraded capacity, and upgraded wall ammunition costs exactly 4,500 while leaving the loaded magazine untouched.
+  - A round-25 eleven-target bound test proved Blitzwerfer selects and kills no more than ten linked enemies. Its accepted shot consumed one loaded round, awarded ten flat explosive-kill bonuses, and left the eleventh enemy alive.
+  - Sonnenpistole tests proved 1,000 direct damage plus radial splash, full-radius lethality, protected outer-radius one-shot behavior, crawler conversion, deterministic falloff, owner self-damage, no friendly-fire path, and flat explosive-kill scoring.
+  - `npm run gate:p6:network`: room `AGCG2L` held a two-client exclusive Forge transaction for 3,000 ms, rejected the second purchaser without charging them, synchronized a 10-round upgraded Jäger magazine, measured exactly 190 authoritative body damage, chained through ten round-25 enemies, and synchronized Sonnenpistole self-damage plus ten crawler conversions.
+  - P4 and P5 network regressions were rerun against the P6 server. Rooms `PCLGZN` and `3DX6GT` kept every prior door, wall-buy, conventional weapon, crate, grenade, power, perk, Max Ammo, revive, reconnect, roster-lock, and Höllenwölfe contract green.
+  - Final production client payload: 816.74 kB JS / 219.82 kB gzip; generated service worker precached the complete static client.
+- Browser acceptance:
+  - The exact production artifact `index-BGUEw33v.js` loaded seed `12345`, reported PWA cache `ready`, and held 60 FPS with 45 draw calls during the authored round-25 ten-target stress scene.
+  - F1 observed `10 / 10 / 0` before firing. One production Blitzwerfer shot changed the state to `10 / 0 / 0`, marked all ten enemies dead, consumed magazine 3 → 2, awarded exactly +500, and entered intermission.
+  - The production Forge gate opened all three authored doors, activated shared power, moved to its Catwalk station, debited exactly 5,000, displayed `Forge upgrading`, lowered the Jäger viewmodel into the chamber, and rendered the powered portal, insertion weapon, sparks, and return treatment.
+  - Distinct original Blitzwerfer coil and Sonnenpistole pressure-chamber viewmodels, additive lightning links, solar splash geometry, dark etched `Über-` materials, and synchronized Forge state are rendered runtime systems rather than test-only stand-ins.
+  - Production diagnostics remained at `Console errors: 0`; server stderr contained no exceptions across P4–P6 network gates.
+- Authority evidence: the shared simulator owns Forge spends/jobs, upgrade stats, wall-ammo pricing, wonder targeting, damage, crawler conversion, self-damage, kills, and points. Co-op schema patches expose read-only Forge state; production mutating diagnostics remain rejected server-side.
