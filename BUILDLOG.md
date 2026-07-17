@@ -168,3 +168,25 @@ Status: passed
   - Distinct original Blitzwerfer coil and Sonnenpistole pressure-chamber viewmodels, additive lightning links, solar splash geometry, dark etched `Über-` materials, and synchronized Forge state are rendered runtime systems rather than test-only stand-ins.
   - Production diagnostics remained at `Console errors: 0`; server stderr contained no exceptions across P4–P6 network gates.
 - Authority evidence: the shared simulator owns Forge spends/jobs, upgrade stats, wall-ammo pricing, wonder targeting, damage, crawler conversion, self-damage, kills, and points. Co-op schema patches expose read-only Forge state; production mutating diagnostics remain rejected server-side.
+
+## P7 — Production audio
+
+Status: passed
+
+- Timestamp: 2026-07-17T16:18:05+10:00
+- Implementation commit: `5edc250eb7b03735e8c4cb1549e122273195c56a`
+- Browser seed: solo production `12345`; authoritative two-client room `H7WMTE`
+- Client count: 2 authoritative clients plus production-browser solo
+- Automated checks:
+  - `npm run check`: passed with zero TypeScript diagnostics; 11 files / 106 tests passed; the production PWA client and authoritative server built successfully.
+  - The audio contract verifies a 48 kHz graph, dynamics-compressor headroom, a strict 56-transient voice ceiling, twelve unique firearm reports and reload-mechanism signatures, five distinct zombie formant families, separate Höllenwölfe synthesis, four original perk jingles, original zombie/wolf/Puppe/round/game-over material, and phoneme-authored calls for all five power-ups.
+  - Listener-relative tests passed at zero and 90-degree yaw. Distance rolloff, cross-room low-pass/gain occlusion, and four distinct room reverb sends are numerically covered. The source audit found no `Math.random`, runtime fetch, `Audio` element, external recording, or nondeterministic gameplay dependency.
+  - The browser's offline 48 kHz production graph rendered the left/right breach pair with 2.11× left-channel dominance, 2.09× right-channel dominance, and a 0.059 peak under the 0.98 ceiling. This provides a measured blind-localization and non-silence check independent of the embedded browser's muted live-output policy.
+  - `npm run gate:p7:network`: room `H7WMTE` delivered authoritative remote melee, Melder fire, weapon-specific reload, enemy species/voice, grenade throw, and post-despawn explosion cues to both clients with exact world coordinates.
+  - Isolated regressions passed in P4 room `YK4QJR`, P5 room `P7FEJW`, and P6 room `2HYESM`. One deliberately concurrent four-gate run invalidated the P5 wolf-drain timing sample under shared dev-server load; the immediate isolated rerun completed the 12-wolf round and guaranteed Max Ammo without a code change.
+  - Final production client payload: 861.06 kB JS / 231.25 kB gzip; generated service worker precached the complete static client.
+- Browser acceptance:
+  - The exact production artifact `index-CW7N7SxB.js` loaded seed `12345`, reported PWA cache `ready`, stayed in active round-one play, and held 60 FPS at 40 draw calls with six enemies.
+  - F1 reported `48 kHz`, the 56-voice limiter, 4.8 dB nominal bus headroom, per-cue activity, listener room, and `RENDER PASS · L 2.11× · R 2.09× · peak 0.059`. Production console errors remained zero.
+  - The in-app verification browser intentionally reports its live `AudioContext` as suspended even after native input because that harness suppresses speaker output; the same shipped context calls `resume()` on native pointer/keyboard input. The production `OfflineAudioContext` rendered the exact cue chain and channel evidence above inside that artifact.
+- Mix and sourcing evidence: effects, ambience, music, voice, and UI buses feed a configured compressor; HRTF panners feed generated room convolution; room and wolf transitions ramp without queued automation buildup. Firearms layer transient/body/noise/mechanism components, barriers and mechanisms use deterministic material synthesis, machines emit powered/dead hum plus coded jingles, and all work remains original procedural code documented in `assets/CREDITS.md`.
