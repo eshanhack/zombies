@@ -212,3 +212,28 @@ Status: passed
   - A real host and guest joined private lobby `63WTJ9`; both clients observed a 2 / 4 locked roster and protocol version 1 with no false version mismatch. Menu, lobby, settings, records, connection failure, reconnect, game-over, and restart states use finished presentation.
 - Character and viewmodel evidence: the shared zombie rig exposes 22 bones and 10,056 triangles per full-detail silhouette; wolves expose 14 bones and 7,884 triangles; remote operatives expose 22 bones. Four zombie silhouettes, all required zombie/wolf states, remote locomotion/combat states, and distinct conventional/wonder viewmodel branches are rendered runtime systems.
 - Art and sourcing evidence: all five atlas channels are deterministic original output from `scripts/generate-material-atlas.ts`; all geometry, rigs, animation, particles, UI art, and audio remain original procedural work. `ART_DIRECTION.md` records the legal historical-material reference board, and `assets/CREDITS.md` confirms that no external pixels, models, recordings, layouts, or proprietary game content ship in the repository.
+
+## P9 — Fidelity, balance, and network hardening
+
+Status: passed
+
+- Timestamp: 2026-07-17T19:54:37+10:00
+- Implementation commit: `6f98ee56887782acb46fdf07f097a34255fca481`
+- Browser seed: solo production `12345`; authoritative rooms `2QQXF4` (two players), `48EVCX` (four players), and `YGN8QH` (four-player adversarial session)
+- Client count: four authoritative clients plus the 1,920×1,080 production-browser solo artifact
+- Automated checks:
+  - `npm test`: all 13 files / 115 tests passed. `npm run build` regenerated the deterministic 2K material atlases, passed TypeScript with zero diagnostics, built the PWA client, and built the authoritative server.
+  - `npm run gate:p9:pacing`: seeds `12345`, `424242`, and `9001` each reproduced three consecutive round-1-through-25 campaigns byte-for-byte. Their seeded Höllenwölfe rounds were `[5,10,16,22]`, `[7,12,17,24]`, and `[7,13,20]` respectively.
+  - Every required normal-round benchmark landed in the pacing envelope with canonical populations: round 1 `43.017 s`, round 4 `79.500 s`, round 7 `138.000 s`, round 10 `171.017 s`, round 15 `268.017 s`, and round 20 `393.500 s`. No canonical CONFIG value was adjusted.
+  - The pacing harness runs the real fixed-60-Hz shared simulator, spawn queue, active cap, seeded wolf schedule, and isolated RNG streams. All normal rounds stayed at or below 24 active enemies; wolf rounds stayed at or below two active wolves per roster player.
+  - `npm run gate:p9:network`: two-player rounds 1–10 produced `7, 9, 15, 21, 12 wolves, 31, 32, 33, 34, 36`; four-player rounds produced `10, 12, 21, 29, 24 wolves, 45, 49, 52, 56, 60`. Every population matched the historical formula or wolf contract under the global cap.
+  - The adversarial room deliberately dropped an input sequence, duplicated another, and varied delivery delay. Authoritative travel was `1.584 m` with `0.000 m` lateral drift. A duplicated fire action generated one response and consumed one round; 200 ms hit rewind stayed inside the server-owned history window and restored current enemy positions after resolution.
+  - A simultaneous Door A attempt charged exactly one 750-point spend, leaving balances `[10520,9750]`. A full-team down ended the run. Protocol version 2, sequenced actions, roster authority, and production cheat rejection remained synchronized.
+  - P4–P7 authoritative regressions passed again in rooms `SSPSME`, `XMU7TH`, `R44KNJ`, and `64LNBT`; server stderr contained no exceptions.
+  - The final production artifact is `index-CabKoI4N.js`, 951.44 kB / 257.67 kB gzip. The generated service worker precaches 12 entries / 4,621.22 KiB.
+- Browser acceptance:
+  - The exact production artifact loaded seed `12345` at 1,920×1,080 and staged 24 animated enemies plus three visible 22-bone remote operatives. F1 reported `24 enemies · R 3`, `24 / 24 / 66`, and round 25.
+  - After a fresh 30-second telemetry window, F1 reported 60 FPS, 135 draw calls, 555k visible triangles, 16.7 ms median frame time, and 16.8 ms p95—inside the release requirement of at least 59 FPS and fewer than 150 calls.
+  - Production browser diagnostics reported offline cache `ready`, a running 48 kHz audio graph, and zero console/page errors. The exact loaded script URL ended in `index-CabKoI4N.js`.
+  - Evidence is committed in `evidence/p9/stress-24-enemies-3-remotes-1080.png` and `evidence/p9/stress-frame-pacing-1080.png`; the former visibly records the three remote rigs and final telemetry.
+- Fidelity hardening evidence: every weapon retains a unique recoil/spread/reload/action signature; every enemy state remains represented in the original rigs; co-op enemies interpolate over the configured 100 ms window; local fire stays immediate while server-confirmed rewind owns damage and points; the rolling 30-second median/p95 frame telemetry is exposed through both F1 and the versioned debug snapshot.
