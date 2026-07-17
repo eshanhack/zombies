@@ -70,3 +70,24 @@ Status: passed
   - Production F1 stabilized at 60 FPS and 38 draw calls with six procedural enemies, fog, open window geometry, barriers, HUD, and the Melder viewmodel visible. Offline cache reported `ready`.
   - Production browser logs contained zero errors and zero warnings throughout spawn, tear, kill, and intermission transitions.
 - Architecture evidence: solo and Colyseus use the same fixed-step `GameSimulation`; gameplay RNG is isolated by stream and never calls `Math.random()`; client enemies render through six dynamic `InstancedMesh` batches capped at 24.
+
+## P3 — Core gunplay and HUD
+
+Status: passed
+
+- Timestamp: 2026-07-17T13:47:44+10:00
+- Implementation commit: `93172b97ddd7`
+- Browser seed: solo `12345`; authoritative combat rooms `VUDV94` (body), `T5LW4N` (head), and `UECQU4` (melee)
+- Client count: 3 independent authoritative gate rooms plus production-browser solo
+- Automated checks:
+  - `npm run check`: passed under the requested TypeScript `7.0.2` pin with zero diagnostics; 7 files / 30 tests passed; production PWA client and server built successfully.
+  - Local combat tests verified deterministic ray hitboxes/spread, 180 RPM cadence rejection, loaded-ammo consumption, exact 1,600 ms Melder reload transfer, +10 connecting hits, +60 body killing shots, and +100 Jäger K-8 headshot kills.
+  - `npm run gate:p3:network`: real Colyseus rooms produced body transactions `[10,10,10,10,60]` and 600 final points, head transactions `[10,100]` and 610 final points, and one 150-damage melee kill worth exactly +130. Ammo, reserve, reload, hitbox, and point state synchronized back through schema patches.
+  - Final production client payload: 742.91 kB JS / 199.85 kB gzip before later phase splitting.
+- Browser acceptance:
+  - Production seed `12345` loaded round 1 with the canvas-generated red tally, full points/ammo HUD, four-line crosshair, F1 combat state, and offline cache `ready`.
+  - A visible centered target was hit in the production artifact: Melder changed from 8 / 32 to 7 / 32, points changed from 500 to 510, the `+10` headshot ledger entry rendered, hitmarker/audio events fired, and authoritative enemy HP changed.
+  - The distinct Jäger K-8 primitive viewmodel and HUD showed 5 / 50; a live headshot awarded +100 and changed it to 4 / 50. Reload displayed a timed `RELOADING · 2.7s` state and completed at 5 / 49 after 2.8 seconds.
+  - Procedural Melder and Jäger firing/reload layers initialized from a user gesture without browser errors. Recoil is applied to the actual input aim and recovers over the canonical 150 ms, while muzzle light and viewmodel kick remain immediate client cosmetics.
+  - Production F1 held 60 FPS at 38 calls with the Melder and 40 calls with the more detailed Jäger viewmodel; production browser logs contained zero errors and zero warnings.
+- Presentation evidence: round 1–5 uses original distressed canvas tally strokes; the numeral renderer, flare/burn/settle transition, point ledger, directional damage layer foundation, low-health treatment, hitmarker, expanding crosshair, ammo/reserve, grenade count, and weapon naming are all live rather than static mockups.
