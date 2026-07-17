@@ -117,3 +117,29 @@ Status: passed
   - Authored chalk wall-buy panels, three physical crate candidates, active blue shaft, animated lid/weapon roll, synchronized doors, and thrown-frag instances are live scene objects rather than HUD-only state.
   - The production browser console contained zero errors and zero warnings. The authoritative server gate completed without exceptions or stderr output.
 - Authority/security evidence: solo and co-op share the same economy simulator and isolated crate RNG stream; the server owns spends, inventory, doors, spin exclusivity, outcomes, refunds, and grenades. Versioned gate mutations are rejected whenever `NODE_ENV=production`.
+
+## P5 — Power, perks, power-ups, co-op life cycle, and Höllenwölfe
+
+Status: passed
+
+- Timestamp: 2026-07-17T15:12:26+10:00
+- Implementation commit: `3103cc19ee2b`
+- Browser seed: solo production `12345`; authoritative two-client room `XGHQW3`
+- Client count: 2 authoritative clients plus production-browser solo
+- Automated checks:
+  - `npm run check`: passed with zero TypeScript diagnostics; 9 files / 93 tests passed; production PWA client and authoritative server built successfully.
+  - Real breaker interaction keeps every machine inactive before power, stages the 3,000 ms room surge once, and exposes shared power state to every client.
+  - Eisenbräu measured exactly five 50-damage hits; Schnellwasser measured exactly 0.5 reload time; Doppelschuss measured the configured 1.33 fire-rate multiplier. Solo Zweiter Atem consumed one of three stocks, waited exactly 3,000 ms, restored both weapons, and removed all perks.
+  - Insta-Kill and Double Points lasted exactly 30,000 ms. Double Points covered bullets, melee, repairs, and team awards. Nuke waited 500 ms, killed live enemies without consuming the queue, and awarded 400 team-wide. Carpenter restored all barriers and awarded 200 team-wide. Untouched drops despawned at exactly 30,000 ms.
+  - Max Ammo refilled every reserve and grenades to four while preserving each loaded magazine byte-for-byte.
+  - Co-op tests measured 4,500 ms normal revives, 2,250 ms Zweiter Atem revives, +50 to the reviver, 30,000 ms bleedout, next-round Melder return with preserved points, and reconnect return with inventory/perks/statistics preserved.
+  - Deterministic wolf tests proved first round in 5–7, subsequent 5–7 intervals, 6/6/8 per-player populations, two-active-per-player cap under the global 24 cap, health sequence 400 / 900 / 1,300 / 1,600 capped, 5.5 m/s speed, 40 damage, 700 ms attack cadence, and guaranteed final-wolf Max Ammo.
+  - `npm run gate:p5:network`: room `XGHQW3` rejected a late join after start, synchronized shared power, observed the exact five-hit Eisenbräu down, timed 2.25 s and 4.5 s revives, awarded +50, synchronized Schnellwasser/Doppelschuss, preserved a 7-round loaded magazine through team Max Ammo, reconnected the original session as a spectator with state preserved, returned it at the next round boundary, and completed a 12-wolf round with guaranteed Max Ammo.
+  - `npm run gate:p4:network` was rerun against the P5 server; all prior doors, wall buys, ten conventional weapons, exclusive crate, and grenade synchronization remained green.
+  - Final production client payload: 795.44 kB JS / 214.19 kB gzip before later phase splitting.
+- Browser acceptance:
+  - The exact production artifact loaded seed `12345` with PWA cache `ready`; F1 showed P5 system state, deterministic next-wolf round, power, perks, active effects, life state, and zero console errors.
+  - Live controls activated power, granted all four perk icons, triggered timed Insta-Kill/Double Points presentation, and started the seeded wolf round. F1 observed `wolves`, red close fog, 250 Eisenbräu HP, synchronized counts, and 60 FPS at 39 draw calls.
+  - Distinct procedural quadruped wolf batches, authored fog-bank spawning, powered perk-machine emissives, physical breaker lever, spinning/blinking power-up geometry, downed/spectator overlays, and the co-op resume entry point are rendered production code rather than test-only state.
+  - Production browser diagnostics reported offline cache `ready`, 60 FPS, 39 draw calls, and `Console errors: 0` throughout the exercised gate.
+- Authority/lifecycle evidence: the server owns all P5 state and rejects production mutations; gameplay pauses when every roster member disconnects, retains the locked room for ten minutes, and then disposes it. Colyseus cryptographic reconnection tokens are persisted under the versioned resume key; a reconnecting original cannot play until the next round boundary.
