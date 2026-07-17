@@ -1,6 +1,6 @@
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
-import { DOORS, FLOOR_ZONES, STATIC_COLLIDERS, type AabbCollider } from '../map/blueprint.js';
+import { DOORS, FLOOR_ZONES, STATIC_COLLIDERS, WINDOWS, type AabbCollider } from '../map/blueprint.js';
 import { NAV_NODES, NAV_NODE_BY_ID } from '../map/navgraph.js';
 import type { CollisionWorld } from '../shared/movement.js';
 
@@ -10,6 +10,7 @@ export class BunkerMap {
   private readonly openDoors = new Set<string>();
   private readonly doorMeshes = new Map<string, THREE.Mesh>();
   private readonly navDebug = new THREE.Group();
+  private boardInstances: THREE.InstancedMesh | null = null;
 
   constructor() {
     this.group.name = 'stahlbunker-map';
@@ -38,6 +39,28 @@ export class BunkerMap {
   toggleNavDebug(): boolean {
     this.navDebug.visible = !this.navDebug.visible;
     return this.navDebug.visible;
+  }
+
+  updateBarriers(barriers: readonly { id: string; boards: number }[]): void {
+    const instances = this.boardInstances;
+    if (instances === null) return;
+    const boardCounts = new Map(barriers.map((barrier) => [barrier.id, barrier.boards]));
+    const dummy = new THREE.Object3D();
+    let instanceIndex = 0;
+    for (let windowIndex = 0; windowIndex < WINDOWS.length; windowIndex += 1) {
+      const window = WINDOWS[windowIndex]!;
+      const count = Math.max(0, Math.min(CONFIG.barriers.boardSlots, boardCounts.get(window.id) ?? CONFIG.barriers.boardSlots));
+      const yaw = window.facing === 'west' ? Math.PI / 2 : window.facing === 'east' ? -Math.PI / 2 : window.facing === 'north' ? Math.PI : 0;
+      for (let slot = 0; slot < count; slot += 1) {
+        dummy.position.set(window.x, window.y - 0.64 + slot * 0.255, window.z);
+        dummy.rotation.set(0, yaw, ((slot + windowIndex) % 3 - 1) * 0.045);
+        dummy.updateMatrix();
+        instances.setMatrixAt(instanceIndex, dummy.matrix);
+        instanceIndex += 1;
+      }
+    }
+    instances.count = instanceIndex;
+    instances.instanceMatrix.needsUpdate = true;
   }
 
   dispose(): void {
@@ -131,20 +154,10 @@ export class BunkerMap {
 
   private buildWindowRecesses(frameMaterial: THREE.Material): void {
     const moonMaterial = new THREE.MeshBasicMaterial({ color: 0x718da0, transparent: true, opacity: 0.2 });
-    const windows = [
-      { x: -4.8, y: 1.65, z: -4.99, yaw: 0 },
-      { x: -1.6, y: 1.65, z: -4.99, yaw: 0 },
-      { x: 1.6, y: 1.65, z: -4.99, yaw: 0 },
-      { x: 4.8, y: 1.65, z: -4.99, yaw: 0 },
-      { x: -14.99, y: 1.65, z: 11.2, yaw: Math.PI / 2 },
-      { x: -14.99, y: 1.65, z: 14.8, yaw: Math.PI / 2 },
-      { x: 12.99, y: 1.65, z: 10.2, yaw: -Math.PI / 2 },
-      { x: 12.99, y: 1.65, z: 15, yaw: -Math.PI / 2 },
-    ];
-    for (const window of windows) {
+    for (const window of WINDOWS) {
       const frame = new THREE.Group();
       frame.position.set(window.x, window.y, window.z);
-      frame.rotation.y = window.yaw;
+      frame.rotation.y = window.facing === 'west' ? Math.PI / 2 : window.facing === 'east' ? -Math.PI / 2 : window.facing === 'north' ? Math.PI : 0;
       const panel = new THREE.Mesh(new THREE.PlaneGeometry(1.55, 1.45), moonMaterial);
       panel.position.z = 0.012;
       frame.add(panel);
@@ -160,6 +173,18 @@ export class BunkerMap {
       }
       this.group.add(frame);
     }
+    const boardMaterial = new THREE.MeshStandardMaterial({ color: 0x4c3625, roughness: 0.88, metalness: 0.01 });
+    this.boardInstances = new THREE.InstancedMesh(
+      new THREE.BoxGeometry(CONFIG.barriers.boardWidthM, CONFIG.barriers.boardHeightM, CONFIG.barriers.boardDepthM),
+      boardMaterial,
+      WINDOWS.length * CONFIG.barriers.boardSlots,
+    );
+    this.boardInstances.instanceMatrix.setUsage(THREE.DynamicDrawUsage);
+    this.boardInstances.castShadow = true;
+    this.boardInstances.receiveShadow = true;
+    this.boardInstances.frustumCulled = false;
+    this.group.add(this.boardInstances);
+    this.updateBarriers(WINDOWS.map((window) => ({ id: window.id, boards: CONFIG.barriers.boardSlots })));
   }
 
   private buildDoorLabels(): void {

@@ -37,6 +37,9 @@ export const CONFIG = {
       { throughRound: 999, mix: [0.1, 0.5, 0.4] },
     ],
     crawlerSpeed: 0.6,
+    spawnRiseMs: 1500,
+    deathDissolveMs: 3000,
+    attackWindupMs: 350,
   },
 
   rounds: {
@@ -134,6 +137,8 @@ export const CONFIG = {
   barriers: {
     boardSlots: 6,
     repairMs: 900,
+    openingWidthM: 1.75,
+    openingHeightM: 1.65,
     boardWidthM: 1.7,
     boardHeightM: 0.16,
     boardDepthM: 0.08,
@@ -146,6 +151,8 @@ export const CONFIG = {
     separationStrength: 2.2,
     windowDistanceWeightOffsetM: 2,
     stuckRespawnMs: 30000,
+    waypointReachM: 0.24,
+    directChaseDistanceM: 4.5,
   },
 
   combat: {
@@ -323,6 +330,17 @@ export const CONFIG = {
       sprintRollRad: -0.42,
       positionLerpPerSecond: 12,
       rotationLerpPerSecond: 14,
+      meleeYawRad: -0.9,
+      meleeDropM: 0.13,
+    },
+    zombieVisual: {
+      spawnDepthM: 1.35,
+      walkCycleHz: 1.6,
+      jogCycleHz: 2.4,
+      sprintCycleHz: 3.5,
+      limbSwingRad: 0.72,
+      deathTiltRad: 1.35,
+      crawlerHeightScale: 0.48,
     },
   },
 

@@ -24,6 +24,7 @@ export class AppShell {
   private readonly lobbyPanel: HTMLElement;
   private readonly hud: HTMLElement;
   private readonly stamina: HTMLElement;
+  private readonly interactionPrompt: HTMLElement;
   private readonly lockPrompt: HTMLButtonElement;
   private readonly controllerValue: HTMLElement;
   private readonly handlers: AppShellHandlers;
@@ -61,7 +62,7 @@ export class AppShell {
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P1 CONTROLLER / MAP</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P2 BARRIERS / ENEMIES</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -69,6 +70,9 @@ export class AppShell {
         <div><dt>Phase</dt><dd data-debug="phase">menu</dd></div>
         <div><dt>Round</dt><dd data-debug="round">0</dd></div>
         <div><dt>Spawn / alive / queued</dt><dd data-debug="counts">0 / 0 / 0</dd></div>
+        <div><dt>HP / points</dt><dd data-debug="vitals">100 / 500</dd></div>
+        <div><dt>Barrier boards</dt><dd data-debug="barriers">0 / 0</dd></div>
+        <div><dt>Enemy states</dt><dd data-debug="enemy-states">none</dd></div>
         <div><dt>Controller</dt><dd data-debug="controller">menu</dd></div>
       </dl>
       <div class="debug-actions">
@@ -92,9 +96,11 @@ export class AppShell {
     this.hud.setAttribute('aria-label', 'Player status');
     this.hud.innerHTML = `
       <div class="crosshair" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="interaction-prompt is-hidden" aria-live="polite"></div>
       <div class="stamina-meter" aria-label="Sprint stamina"><span></span></div>
     `;
     this.stamina = this.hud.querySelector('.stamina-meter') as HTMLElement;
+    this.interactionPrompt = this.hud.querySelector('.interaction-prompt') as HTMLElement;
     this.root.append(this.hud);
 
     this.lockPrompt = document.createElement('button');
@@ -195,6 +201,9 @@ export class AppShell {
         this.lockPrompt.classList.toggle('is-hidden', controller.locked);
         this.controllerValue.textContent = `${controller.x.toFixed(2)}, ${controller.y.toFixed(2)}, ${controller.z.toFixed(2)}${controller.noclip ? ' · NOCLIP' : ''}`;
       }
+      const interaction = scene.getInteractionPrompt();
+      this.interactionPrompt.textContent = interaction ?? '';
+      this.interactionPrompt.classList.toggle('is-hidden', interaction === null);
     }, 250);
   }
 
@@ -272,7 +281,15 @@ export class AppShell {
     this.seedValue.textContent = String(snapshot.seed);
     (this.overlay.querySelector('[data-debug="phase"]') as HTMLElement).textContent = snapshot.phase;
     (this.overlay.querySelector('[data-debug="round"]') as HTMLElement).textContent = String(snapshot.round);
-    (this.overlay.querySelector('[data-debug="counts"]') as HTMLElement).textContent = `${snapshot.spawned} / ${snapshot.enemies.length} / ${snapshot.queued}`;
+    const alive = snapshot.enemies.filter((enemy) => enemy.state !== 'dead').length;
+    (this.overlay.querySelector('[data-debug="counts"]') as HTMLElement).textContent = `${snapshot.spawned} / ${alive} / ${snapshot.queued}`;
+    const player = snapshot.players[0];
+    (this.overlay.querySelector('[data-debug="vitals"]') as HTMLElement).textContent = `${player?.hp ?? 0} / ${player?.points ?? 0}`;
+    const boardCount = snapshot.barriers.reduce((total, barrier) => total + barrier.boards, 0);
+    (this.overlay.querySelector('[data-debug="barriers"]') as HTMLElement).textContent = `${boardCount} / ${snapshot.barriers.length * CONFIG.barriers.boardSlots}`;
+    const stateCounts = new Map<string, number>();
+    for (const enemy of snapshot.enemies) stateCounts.set(enemy.state, (stateCounts.get(enemy.state) ?? 0) + 1);
+    (this.overlay.querySelector('[data-debug="enemy-states"]') as HTMLElement).textContent = [...stateCounts].map(([state, count]) => `${state}:${count}`).join(' · ') || 'none';
   }
 
   private bindSettings(): void {

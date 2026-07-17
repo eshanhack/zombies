@@ -114,6 +114,7 @@ h1 span + span { color: var(--blood); background: linear-gradient(#ce3334, #7810
 .crosshair i:nth-child(3), .crosshair i:nth-child(4) { width: 1px; height: 8px; left: 16px; }
 .crosshair i:nth-child(3) { top: 1px; }
 .crosshair i:nth-child(4) { bottom: 1px; }
+.interaction-prompt { position: absolute; left: 50%; bottom: 19%; transform: translateX(-50%); padding: 8px 14px; color: rgba(238,234,216,.94); background: linear-gradient(90deg, transparent, rgba(3,5,4,.62) 16%, rgba(3,5,4,.62) 84%, transparent); font: 600 13px/1.2 var(--font-mono); letter-spacing: .045em; text-shadow: 0 2px 3px #000; }
 .stamina-meter { --stamina: 100%; position: absolute; left: 50%; bottom: 42px; width: 176px; height: 3px; transform: translateX(-50%); overflow: hidden; background: rgba(255,255,255,.08); opacity: 0; transition: opacity 150ms ease; }
 .stamina-meter.is-active { opacity: 1; }
 .stamina-meter span { display: block; width: var(--stamina); height: 100%; background: linear-gradient(90deg, #6b7772, #d8d5c7); box-shadow: 0 0 6px rgba(220,225,215,.35); }

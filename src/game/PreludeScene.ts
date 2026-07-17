@@ -1,10 +1,13 @@
 import * as THREE from 'three';
 import { CONFIG } from '../config.js';
-import { START_POSITIONS } from '../map/blueprint.js';
+import { DOORS, START_POSITIONS, WINDOWS } from '../map/blueprint.js';
 import { SeededRng } from '../shared/rng.js';
 import type { MovementInput } from '../shared/movement.js';
+import { GameSimulation, type SimPlayer } from '../shared/GameSimulation.js';
 import { BunkerMap } from './BunkerMap.js';
+import { EnemyRenderer, type EnemyVisualState } from './EnemyRenderer.js';
 import { FirstPersonController, type AuthoritativePlayerState, type ControllerReadout } from './FirstPersonController.js';
+import type { NetworkGameView } from '../network/CoopClient.js';
 
 export interface SceneMetrics {
   fps: number;
@@ -23,7 +26,31 @@ export interface RemotePlayerPose {
 
 export interface GameplayOptions {
   mode: 'solo' | 'coop';
+  seed: number;
   sendInput?: (input: MovementInput) => void;
+  sendAction?: (action: { type: 'melee' } | { type: 'repair'; held: boolean }) => void;
+}
+
+export interface SceneSimulationReadout {
+  round: number;
+  elapsedMs: number;
+  spawned: number;
+  queued: number;
+  alive: number;
+  phase: 'playing' | 'intermission';
+  hp: number;
+  maxHp: number;
+  points: number;
+  barriers: readonly { id: string; room: string; boards: number; repairProgressMs: number }[];
+  enemies: readonly SceneEnemyReadout[];
+}
+
+export interface SceneEnemyReadout extends EnemyVisualState {
+  hp: number;
+  maxHp: number;
+  speed: number;
+  barrierId: string;
+  targetPlayerId: string;
 }
 
 interface RemoteVisual {
@@ -44,7 +71,12 @@ export class PreludeScene {
   private fogParticles: THREE.Points | null = null;
   private lamp: THREE.PointLight | null = null;
   private bunkerMap: BunkerMap | null = null;
+  private enemyRenderer: EnemyRenderer | null = null;
   private controller: FirstPersonController | null = null;
+  private simulation: GameSimulation | null = null;
+  private soloPlayer: SimPlayer | null = null;
+  private networkSimulation: NetworkGameView | null = null;
+  private sendAction: GameplayOptions['sendAction'];
   private viewmodel: THREE.Group | null = null;
   private mode: 'menu' | 'gameplay' = 'menu';
   private gameMode: 'solo' | 'coop' = 'solo';
@@ -53,6 +85,8 @@ export class PreludeScene {
   private elapsedSample = 0;
   private sampledFrames = 0;
   private gameplayElapsed = 0;
+  private meleeAnimationRemainingMs = 0;
+  private godMode = false;
   private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0 };
 
   constructor(seed: number) {
@@ -98,6 +132,8 @@ export class PreludeScene {
     this.lamp = null;
     this.bunkerMap = new BunkerMap();
     this.scene.add(this.bunkerMap.group);
+    this.enemyRenderer = new EnemyRenderer();
+    this.scene.add(this.enemyRenderer.group);
     this.scene.add(this.remoteRoot);
     this.scene.add(this.camera);
     this.scene.background = new THREE.Color(0x080b0b);
@@ -106,12 +142,35 @@ export class PreludeScene {
     this.camera.near = CONFIG.rendering.cameraNearM;
     this.camera.far = CONFIG.rendering.cameraFarM;
     this.camera.updateProjectionMatrix();
+    this.sendAction = options.sendAction;
+    if (options.mode === 'solo') {
+      this.simulation = new GameSimulation({ seed: options.seed, mode: 'solo', rosterSize: 1 });
+      this.soloPlayer = {
+        id: 'local',
+        x: CONFIG.map.startPosition.x,
+        y: CONFIG.map.startPosition.y,
+        z: CONFIG.map.startPosition.z,
+        yaw: 0,
+        hp: CONFIG.player.maxHp,
+        maxHp: CONFIG.player.maxHp,
+        points: CONFIG.points.starting,
+        connected: true,
+        downed: false,
+        invulnerableUntilMs: 0,
+      };
+      this.networkSimulation = null;
+    } else {
+      this.simulation = null;
+      this.soloPlayer = null;
+    }
     this.controller = new FirstPersonController({
       canvas: this.canvas,
       collisionWorld: this.bunkerMap.collisionWorld,
       startPosition: options.mode === 'solo' ? CONFIG.map.startPosition : (START_POSITIONS[0] ?? CONFIG.map.startPosition),
       networked: options.mode === 'coop',
       sendInput: options.sendInput,
+      onMelee: this.handleMelee,
+      onInteractChange: this.handleInteractChange,
     });
     this.viewmodel = this.buildViewmodel();
     this.camera.add(this.viewmodel);
@@ -122,6 +181,12 @@ export class PreludeScene {
 
   reconcileLocalPlayer(state: AuthoritativePlayerState): void {
     this.controller?.reconcile(state);
+  }
+
+  applyNetworkSimulation(view: NetworkGameView): void {
+    this.networkSimulation = view;
+    if (this.gameMode !== 'coop') return;
+    this.refreshSimulationVisuals();
   }
 
   updateRemotePlayers(poses: readonly RemotePlayerPose[]): void {
@@ -152,13 +217,83 @@ export class PreludeScene {
     if (name === 'nav') return this.bunkerMap?.toggleNavDebug() ?? false;
     if (name === 'doors' && this.gameMode === 'solo') {
       this.bunkerMap?.setAllDoorsOpen(true);
+      for (const door of DOORS) this.simulation?.setDoorOpen(door.id, true);
       return true;
+    }
+    if (this.gameMode !== 'solo' || this.simulation === null || this.soloPlayer === null) return false;
+    if (name === 'points') {
+      this.soloPlayer.points += 10000;
+      return true;
+    }
+    if (name === 'spawn') return this.simulation.forceSpawn([this.soloPlayer]) !== null;
+    if (name === 'kill') {
+      this.simulation.killAll();
+      return true;
+    }
+    if (name === 'skip') {
+      this.simulation.skipRound([this.soloPlayer]);
+      return true;
+    }
+    if (name === 'god') {
+      this.godMode = !this.godMode;
+      this.soloPlayer.hp = this.soloPlayer.maxHp;
+      return this.godMode;
     }
     return false;
   }
 
   getControllerReadout(): ControllerReadout | null {
     return this.controller?.getReadout() ?? null;
+  }
+
+  getSimulationReadout(): SceneSimulationReadout | null {
+    if (this.gameMode === 'solo' && this.simulation !== null && this.soloPlayer !== null) {
+      return {
+        round: this.simulation.round,
+        elapsedMs: this.simulation.elapsedMs,
+        spawned: this.simulation.spawnedThisRound,
+        queued: this.simulation.queued,
+        alive: this.simulation.aliveCount,
+        phase: this.simulation.phase === 'active' ? 'playing' : 'intermission',
+        hp: this.soloPlayer.hp,
+        maxHp: this.soloPlayer.maxHp,
+        points: this.soloPlayer.points,
+        barriers: [...this.simulation.barriers.values()],
+        enemies: [...this.simulation.enemies.values()].map(toEnemyVisual),
+      };
+    }
+    const network = this.networkSimulation;
+    if (this.gameMode === 'coop' && network !== null) {
+      return {
+        round: network.round,
+        elapsedMs: 0,
+        spawned: network.spawned,
+        queued: network.queued,
+        alive: network.alive,
+        phase: network.phase === 'intermission' ? 'intermission' : 'playing',
+        hp: network.localHp,
+        maxHp: network.localMaxHp,
+        points: network.localPoints,
+        barriers: network.barriers,
+        enemies: network.enemies.map(toEnemyVisual),
+      };
+    }
+    return null;
+  }
+
+  getInteractionPrompt(): string | null {
+    const controller = this.controller?.getReadout();
+    const readout = this.getSimulationReadout();
+    if (controller === undefined || controller === null || readout === null) return null;
+    for (const barrier of readout.barriers) {
+      if (barrier.boards >= CONFIG.barriers.boardSlots) continue;
+      const window = WINDOWS.find((candidate) => candidate.id === barrier.id);
+      if (window === undefined) continue;
+      if (Math.hypot(controller.x - window.insideX, controller.z - window.insideZ) <= CONFIG.controller.interactionRangeM) {
+        return 'Hold F to rebuild barrier';
+      }
+    }
+    return null;
   }
 
   isGameplay(): boolean {
@@ -170,6 +305,7 @@ export class PreludeScene {
     this.frameHandle = 0;
     window.removeEventListener('resize', this.onResize);
     this.controller?.dispose();
+    this.enemyRenderer?.dispose();
     this.bunkerMap?.dispose();
     this.timer.dispose();
     this.renderer.dispose();
@@ -322,12 +458,26 @@ export class PreludeScene {
     let subSteps = 0;
     while (this.fixedAccumulator >= fixedDelta && subSteps < CONFIG.simulation.maxSubSteps) {
       controller.fixedUpdate();
+      if (this.simulation !== null && this.soloPlayer !== null) {
+        const readout = controller.getReadout();
+        this.soloPlayer.x = readout.x;
+        this.soloPlayer.y = readout.y;
+        this.soloPlayer.z = readout.z;
+        this.soloPlayer.yaw = readout.yaw;
+        this.simulation.update(1000 / CONFIG.simulation.hz, [this.soloPlayer]);
+        if (this.godMode) {
+          this.soloPlayer.hp = this.soloPlayer.maxHp;
+          this.soloPlayer.downed = false;
+        }
+      }
       this.fixedAccumulator -= fixedDelta;
       subSteps += 1;
     }
     controller.applyCamera(this.camera);
     this.gameplayElapsed += delta;
+    this.meleeAnimationRemainingMs = Math.max(0, this.meleeAnimationRemainingMs - delta * 1000);
     this.updateViewmodel(controller.getReadout(), delta);
+    this.refreshSimulationVisuals();
     const interpolationAlpha = Math.min(1, delta / (CONFIG.coop.interpolationMs / 1000));
     for (const visual of this.remotePlayers.values()) {
       visual.group.position.lerp(visual.targetPosition, interpolationAlpha);
@@ -353,7 +503,49 @@ export class PreludeScene {
     const targetRoll = readout.sprinting ? CONFIG.rendering.viewmodel.sprintRollRad : Math.sin(this.gameplayElapsed * CONFIG.controller.bobFrequency * 0.5) * 0.018 * moveRatio;
     const rotationAlpha = 1 - Math.exp(-CONFIG.rendering.viewmodel.rotationLerpPerSecond * delta);
     viewmodel.rotation.z = THREE.MathUtils.lerp(viewmodel.rotation.z, targetRoll, rotationAlpha);
+    const meleeProgress = this.meleeAnimationRemainingMs > 0
+      ? 1 - this.meleeAnimationRemainingMs / CONFIG.melee.cooldownMs
+      : 0;
+    const meleeArc = this.meleeAnimationRemainingMs > 0 ? Math.sin(meleeProgress * Math.PI) : 0;
+    viewmodel.position.y -= meleeArc * CONFIG.rendering.viewmodel.meleeDropM;
+    viewmodel.rotation.y = THREE.MathUtils.lerp(
+      viewmodel.rotation.y,
+      meleeArc * CONFIG.rendering.viewmodel.meleeYawRad,
+      rotationAlpha,
+    );
   }
+
+  private refreshSimulationVisuals(): void {
+    const readout = this.getSimulationReadout();
+    if (readout === null) return;
+    this.enemyRenderer?.update(readout.enemies);
+    this.bunkerMap?.updateBarriers(readout.barriers);
+  }
+
+  private readonly handleMelee = (): void => {
+    this.meleeAnimationRemainingMs = CONFIG.melee.cooldownMs;
+    if (this.gameMode === 'coop') {
+      this.sendAction?.({ type: 'melee' });
+      return;
+    }
+    if (this.simulation === null || this.soloPlayer === null) return;
+    const readout = this.controller?.getReadout();
+    if (readout !== undefined) {
+      this.soloPlayer.x = readout.x;
+      this.soloPlayer.y = readout.y;
+      this.soloPlayer.z = readout.z;
+      this.soloPlayer.yaw = readout.yaw;
+    }
+    this.simulation.melee(this.soloPlayer);
+  };
+
+  private readonly handleInteractChange = (held: boolean): void => {
+    if (this.gameMode === 'coop') {
+      this.sendAction?.({ type: 'repair', held });
+      return;
+    }
+    if (this.soloPlayer !== null) this.simulation?.setRepairHeld(this.soloPlayer.id, held);
+  };
 
   private readonly render = (timestamp: number): void => {
     this.timer.update(timestamp);
@@ -405,4 +597,40 @@ export class PreludeScene {
 function lerpAngle(from: number, to: number, alpha: number): number {
   const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
   return from + delta * alpha;
+}
+
+function toEnemyVisual(enemy: {
+  id: number;
+  kind: 'zombie' | 'crawler';
+  state: EnemyVisualState['state'];
+  speedTier: EnemyVisualState['speedTier'];
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+  stateTimeMs: number;
+  spawnProgress: number;
+  hp: number;
+  maxHp: number;
+  speed: number;
+  barrierId: string;
+  targetPlayerId: string;
+}): SceneEnemyReadout {
+  return {
+    id: enemy.id,
+    kind: enemy.kind,
+    state: enemy.state,
+    speedTier: enemy.speedTier,
+    x: enemy.x,
+    y: enemy.y,
+    z: enemy.z,
+    yaw: enemy.yaw,
+    stateTimeMs: enemy.stateTimeMs,
+    spawnProgress: enemy.spawnProgress,
+    hp: enemy.hp,
+    maxHp: enemy.maxHp,
+    speed: enemy.speed,
+    barrierId: enemy.barrierId,
+    targetPlayerId: enemy.targetPlayerId,
+  };
 }

@@ -6,6 +6,8 @@ import { parseSeed } from './shared/rng';
 import type { GameSnapshot } from './shared/types';
 import { AppShell } from './ui/AppShell';
 import { CoopClient, type LobbyView } from './network/CoopClient';
+import { WINDOWS } from './map/blueprint';
+import type { RoomId } from './config';
 
 declare global {
   interface Window {
@@ -38,6 +40,7 @@ const coop = new CoopClient();
 const getSnapshot = (): GameSnapshot => {
   const metrics = scene.getMetrics();
   const controller = scene.getControllerReadout();
+  const simulation = scene.getSimulationReadout();
   const players: GameSnapshot['players'] = controller === null ? [] : [{
     id: 'local',
     name: 'Wanderer',
@@ -45,15 +48,15 @@ const getSnapshot = (): GameSnapshot => {
     velocity: { x: controller.vx, y: controller.vy, z: controller.vz },
     yaw: controller.yaw,
     pitch: controller.pitch,
-    hp: CONFIG.player.maxHp,
-    maxHp: CONFIG.player.maxHp,
-    points: CONFIG.points.starting,
+    hp: simulation?.hp ?? CONFIG.player.maxHp,
+    maxHp: simulation?.maxHp ?? CONFIG.player.maxHp,
+    points: simulation?.points ?? CONFIG.points.starting,
     staminaMs: controller.staminaMs,
     weapons: [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false }],
     activeWeaponIndex: 0,
     grenades: CONFIG.combat.maxGrenades,
     perks: [],
-    downed: false,
+    downed: (simulation?.hp ?? CONFIG.player.maxHp) <= 0,
     spectating: false,
     connected: true,
     stats: { kills: 0, headshots: 0, shots: 0, hits: 0, pointsEarned: 0, doorsOpened: 0, crateRolls: 0, revives: 0, downs: 0 },
@@ -61,17 +64,36 @@ const getSnapshot = (): GameSnapshot => {
   return {
     seed: activeSeed,
     mode: activeMode,
-    phase: activePhase,
-    round: 0,
+    phase: simulation?.phase ?? activePhase,
+    round: simulation?.round ?? 0,
     roundIsWolves: false,
-    spawned: 0,
-    queued: 0,
-    elapsedMs: 0,
+    spawned: simulation?.spawned ?? 0,
+    queued: simulation?.queued ?? 0,
+    elapsedMs: simulation?.elapsedMs ?? 0,
     powerOn: false,
     doorsOpen: [false, false, false],
     players,
-    enemies: [],
-    barriers: [],
+    enemies: simulation?.enemies.map((enemy) => ({
+      id: enemy.id,
+      kind: enemy.kind,
+      state: enemy.state,
+      position: { x: enemy.x, y: enemy.y, z: enemy.z },
+      velocity: { x: 0, y: 0, z: 0 },
+      yaw: enemy.yaw,
+      hp: enemy.hp,
+      maxHp: enemy.maxHp,
+      speed: enemy.speed,
+      room: WINDOWS.find((window) => window.id === enemy.barrierId)?.room ?? 'start',
+      targetPlayerId: enemy.targetPlayerId,
+      headless: false,
+      spawnProgress: enemy.spawnProgress,
+      stateTimeMs: enemy.stateTimeMs,
+    })) ?? [],
+    barriers: simulation?.barriers.map((barrier) => ({
+      id: barrier.id,
+      room: normalizeRoom(barrier.room),
+      boards: barrier.boards,
+    })) ?? [],
     powerups: [],
     drawCalls: metrics.drawCalls,
     fps: metrics.fps,
@@ -84,7 +106,12 @@ const startGameplay = (mode: GameSnapshot['mode']): void => {
   activeMode = mode;
   activePhase = mode === 'solo' ? 'playing' : 'intermission';
   shell.startGameplay();
-  scene.enterGameplay({ mode, sendInput: mode === 'coop' ? (input) => coop.sendInput(input) : undefined });
+  scene.enterGameplay({
+    mode,
+    seed: activeSeed,
+    sendInput: mode === 'coop' ? (input) => coop.sendInput(input) : undefined,
+    sendAction: mode === 'coop' ? (action) => coop.sendAction(action) : undefined,
+  });
 };
 
 const renderLobby = (view: LobbyView): void => {
@@ -131,6 +158,7 @@ coop.onMovement((local, players) => {
   if (local !== null) scene.reconcileLocalPlayer(local);
   scene.updateRemotePlayers(players);
 });
+coop.onSimulation((view) => scene.applyNetworkSimulation(view));
 
 window.__STAHLBUNKER_DEBUG__ = {
   version: 1,
@@ -158,3 +186,7 @@ document.addEventListener('visibilitychange', () => {
 });
 
 void CONFIG;
+
+function normalizeRoom(value: string): RoomId {
+  return value === 'armory' || value === 'generator' || value === 'catwalk' ? value : 'start';
+}

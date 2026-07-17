@@ -15,6 +15,8 @@ export interface ControllerOptions {
   startPosition: { x: number; y: number; z: number };
   networked: boolean;
   sendInput?: (input: MovementInput) => void;
+  onMelee?: () => void;
+  onInteractChange?: (held: boolean) => void;
 }
 
 export interface ControllerReadout extends KinematicState {
@@ -38,6 +40,8 @@ export class FirstPersonController {
   private readonly collisionWorld: CollisionWorld;
   private readonly networked: boolean;
   private readonly sendInput?: (input: MovementInput) => void;
+  private readonly onMelee?: () => void;
+  private readonly onInteractChange?: (held: boolean) => void;
   private readonly pressed = new Set<string>();
   private readonly predictedSteps: PredictedStep[] = [];
   private state: KinematicState;
@@ -55,6 +59,8 @@ export class FirstPersonController {
     this.collisionWorld = options.collisionWorld;
     this.networked = options.networked;
     this.sendInput = options.sendInput;
+    this.onMelee = options.onMelee;
+    this.onInteractChange = options.onInteractChange;
     this.state = {
       ...options.startPosition,
       vx: 0,
@@ -151,6 +157,7 @@ export class FirstPersonController {
   dispose(): void {
     if (this.disposed) return;
     this.disposed = true;
+    this.onInteractChange?.(false);
     window.removeEventListener('keydown', this.onKeyDown);
     window.removeEventListener('keyup', this.onKeyUp);
     window.removeEventListener('mousemove', this.onMouseMove);
@@ -177,10 +184,13 @@ export class FirstPersonController {
 
   private readonly onKeyDown = (event: KeyboardEvent): void => {
     this.pressed.add(event.code);
+    if (event.code === 'KeyV' && !event.repeat) this.onMelee?.();
+    if (event.code === 'KeyF' && !event.repeat) this.onInteractChange?.(true);
   };
 
   private readonly onKeyUp = (event: KeyboardEvent): void => {
     this.pressed.delete(event.code);
+    if (event.code === 'KeyF') this.onInteractChange?.(false);
   };
 
   private readonly onMouseMove = (event: MouseEvent): void => {
@@ -195,6 +205,7 @@ export class FirstPersonController {
 
   private readonly onMouseDown = (event: MouseEvent): void => {
     if (event.button === 2) this.ads = true;
+    if (event.button === 1) this.onMelee?.();
   };
 
   private readonly onMouseUp = (event: MouseEvent): void => {

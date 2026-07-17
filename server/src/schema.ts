@@ -16,11 +16,38 @@ export class NetPlayer extends Schema {
   @type('uint32') lastProcessedInput: number = 0;
   @type('boolean') grounded: boolean = true;
   @type('uint16') hp: number = CONFIG.player.maxHp;
+  @type('uint16') maxHp: number = CONFIG.player.maxHp;
   @type('uint32') points: number = CONFIG.points.starting;
+  @type('float64') invulnerableUntilMs: number = 0;
   @type('boolean') ready: boolean = false;
   @type('boolean') connected: boolean = true;
   @type('boolean') spectating: boolean = false;
   @type('boolean') downed: boolean = false;
+}
+
+export class NetBarrier extends Schema {
+  @type('string') id: string = '';
+  @type('string') room: string = 'start';
+  @type('uint8') boards: number = CONFIG.barriers.boardSlots;
+  @type('float32') repairProgressMs: number = 0;
+}
+
+export class NetEnemy extends Schema {
+  @type('uint32') id: number = 0;
+  @type('string') kind: string = 'zombie';
+  @type('string') state: string = 'spawn';
+  @type('string') speedTier: string = 'walk';
+  @type('float32') x: number = 0;
+  @type('float32') y: number = 0;
+  @type('float32') z: number = 0;
+  @type('float32') yaw: number = 0;
+  @type('uint32') hp: number = CONFIG.zombie.baseHp;
+  @type('uint32') maxHp: number = CONFIG.zombie.baseHp;
+  @type('float32') speed: number = CONFIG.zombie.speeds.walk;
+  @type('string') barrierId: string = '';
+  @type('string') targetPlayerId: string = '';
+  @type('float32') stateTimeMs: number = 0;
+  @type('float32') spawnProgress: number = 0;
 }
 
 export class BunkerState extends Schema {
@@ -29,8 +56,13 @@ export class BunkerState extends Schema {
   @type('string') hostId: string = '';
   @type('string') phase: string = 'lobby';
   @type('uint16') round: number = 0;
+  @type('uint16') spawned: number = 0;
+  @type('uint16') queued: number = 0;
+  @type('uint16') alive: number = 0;
   @type('boolean') started: boolean = false;
   @type('boolean') powerOn: boolean = false;
   @type('float64') serverTimeMs: number = 0;
   @type({ map: NetPlayer }) players: MapSchema<NetPlayer> = new MapSchema<NetPlayer>();
+  @type({ map: NetBarrier }) barriers: MapSchema<NetBarrier> = new MapSchema<NetBarrier>();
+  @type({ map: NetEnemy }) enemies: MapSchema<NetEnemy> = new MapSchema<NetEnemy>();
 }
