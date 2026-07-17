@@ -42,6 +42,8 @@ export interface FireResult {
   pelletHits: number;
   damage: number;
   points: number;
+  affectedEnemyIds: number[];
+  impact: ShotVector | null;
 }
 
 export interface ReloadResult {
@@ -94,6 +96,15 @@ export function activeWeapon(state: CombatPlayerState): RuntimeWeaponState {
     upgraded: false,
     readyAtMs: 0,
   };
+}
+
+export function weaponMagazineCapacity(weapon: Pick<RuntimeWeaponState, 'id' | 'upgraded'>): number {
+  const base = CONFIG.weapons[weapon.id].magazine;
+  if (!weapon.upgraded) return base;
+  const multiplier = base <= CONFIG.forge.smallMagazineThreshold
+    ? CONFIG.forge.smallMagazineMultiplier
+    : CONFIG.forge.largeMagazineMultiplier;
+  return Math.round(base * multiplier);
 }
 
 export function shotDirection(yaw: number, pitch: number, spread: number, rng: SeededRng): ShotVector {

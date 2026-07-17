@@ -4,6 +4,7 @@ import {
   CRATE_LOCATIONS,
   DOORS,
   FLOOR_ZONES,
+  FORGE,
   PERK_MACHINES,
   POWER_SWITCH,
   STATIC_COLLIDERS,
@@ -23,6 +24,13 @@ export class BunkerMap {
   private readonly crateVisuals = new Map<string, { group: THREE.Group; lid: THREE.Mesh; shaft: THREE.Mesh; weapon: THREE.Mesh }>();
   private readonly perkVisuals = new Map<PerkId, { material: THREE.MeshStandardMaterial; light: THREE.PointLight; sign: THREE.MeshStandardMaterial }>();
   private readonly powerupVisuals: { group: THREE.Group; core: THREE.MeshStandardMaterial; ring: THREE.MeshStandardMaterial; light: THREE.PointLight }[] = [];
+  private forgeVisual: {
+    core: THREE.MeshStandardMaterial;
+    etch: THREE.MeshStandardMaterial;
+    light: THREE.PointLight;
+    sparks: THREE.Points;
+    weapon: THREE.Group;
+  } | null = null;
   private powerLever: THREE.Mesh | null = null;
   private boardInstances: THREE.InstancedMesh | null = null;
   private grenadeInstances: THREE.InstancedMesh | null = null;
@@ -166,6 +174,35 @@ export class BunkerMap {
         powerup.z,
       );
       visual.group.rotation.y = elapsedMs / 1000 * CONFIG.powerups.visualSpinRadPerSecond;
+    }
+  }
+
+  updateForge(
+    forge: { phase: 'idle' | 'upgrading'; remainingMs: number },
+    powerOn: boolean,
+    elapsedMs: number,
+  ): void {
+    const visual = this.forgeVisual;
+    if (visual === null) return;
+    const upgrading = forge.phase === 'upgrading';
+    const progress = upgrading ? 1 - forge.remainingMs / CONFIG.forge.animationMs : 0;
+    visual.core.emissiveIntensity = powerOn
+      ? upgrading ? CONFIG.rendering.forgeVisual.upgradingEmissive : CONFIG.rendering.forgeVisual.poweredEmissive
+      : CONFIG.rendering.forgeVisual.unpoweredEmissive;
+    visual.etch.emissiveIntensity = powerOn
+      ? upgrading ? CONFIG.rendering.forgeVisual.upgradingEmissive : CONFIG.rendering.forgeVisual.poweredEmissive
+      : CONFIG.rendering.forgeVisual.unpoweredEmissive;
+    visual.light.intensity = powerOn
+      ? CONFIG.rendering.forgeVisual.lightIntensity * (upgrading ? 0.72 + Math.sin(elapsedMs * 0.045) * 0.28 : 0.2)
+      : 0;
+    visual.sparks.visible = upgrading;
+    visual.sparks.rotation.y = elapsedMs * 0.004;
+    (visual.sparks.material as THREE.PointsMaterial).opacity = upgrading ? 0.45 + Math.sin(elapsedMs * 0.028) * 0.35 : 0;
+    visual.weapon.visible = upgrading;
+    if (upgrading) {
+      visual.weapon.position.y = CONFIG.rendering.forgeVisual.bodyHeightM * (0.82 - Math.sin(progress * Math.PI) * 0.36);
+      visual.weapon.rotation.y = elapsedMs * 0.0024;
+      visual.weapon.scale.setScalar(0.78 + Math.sin(progress * Math.PI) * 0.08);
     }
   }
 
@@ -378,7 +415,109 @@ export class BunkerMap {
     this.group.add(this.grenadeInstances);
 
     this.buildPowerAndPerks(steel);
+    this.buildForge(steel);
     this.buildPowerupPool();
+  }
+
+  private buildForge(steel: THREE.Material): void {
+    const visual = CONFIG.rendering.forgeVisual;
+    const group = new THREE.Group();
+    group.position.set(FORGE.x, FORGE.y, FORGE.z);
+    group.rotation.y = FORGE.yaw;
+    const shell = new THREE.MeshStandardMaterial({
+      color: visual.metalColor,
+      roughness: 0.46,
+      metalness: 0.82,
+    });
+    const core = new THREE.MeshStandardMaterial({
+      color: visual.emberColor,
+      emissive: visual.emberColor,
+      emissiveIntensity: visual.unpoweredEmissive,
+      roughness: 0.28,
+      metalness: 0.32,
+    });
+    const etch = new THREE.MeshStandardMaterial({
+      color: visual.etchColor,
+      emissive: visual.emberColor,
+      emissiveIntensity: visual.unpoweredEmissive,
+      roughness: 0.4,
+      metalness: 0.5,
+    });
+    const body = new THREE.Mesh(new THREE.BoxGeometry(visual.bodyWidthM, visual.bodyHeightM, visual.bodyDepthM), shell);
+    body.position.y = visual.bodyHeightM * 0.5;
+    body.castShadow = true;
+    group.add(body);
+    const chamber = new THREE.Mesh(
+      new THREE.CylinderGeometry(visual.chamberRadiusM, visual.chamberRadiusM, visual.chamberLengthM, 20, 1, true),
+      core,
+    );
+    chamber.rotation.z = Math.PI / 2;
+    chamber.position.set(0, visual.bodyHeightM * 0.74, -visual.bodyDepthM * 0.52);
+    group.add(chamber);
+    for (const side of [-1, 1]) {
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(visual.ringRadiusM, visual.ringTubeM, 8, 24), etch);
+      ring.rotation.y = Math.PI / 2;
+      ring.position.set(side * visual.chamberLengthM * 0.43, visual.bodyHeightM * 0.74, -visual.bodyDepthM * 0.52);
+      group.add(ring);
+      const conduit = new THREE.Mesh(new THREE.CylinderGeometry(visual.ringTubeM, visual.ringTubeM, visual.bodyHeightM * 0.58, 8), steel);
+      conduit.position.set(side * visual.bodyWidthM * 0.38, visual.bodyHeightM * 0.34, -visual.bodyDepthM * 0.58);
+      group.add(conduit);
+    }
+    const hatch = new THREE.Mesh(new THREE.BoxGeometry(visual.bodyWidthM * 0.62, visual.bodyHeightM * 0.34, visual.ringTubeM), etch);
+    hatch.position.set(0, visual.bodyHeightM * 0.3, -visual.bodyDepthM * 0.53);
+    group.add(hatch);
+    const portal = new THREE.Mesh(
+      new THREE.TorusGeometry(visual.ringRadiusM * 0.78, visual.ringTubeM * 1.4, 10, 28),
+      etch,
+    );
+    portal.position.set(0, visual.bodyHeightM * 0.67, -visual.bodyDepthM * 0.59);
+    group.add(portal);
+    const throat = new THREE.Mesh(
+      new THREE.CircleGeometry(visual.ringRadiusM * 0.68, 28),
+      core,
+    );
+    throat.position.set(0, visual.bodyHeightM * 0.67, -visual.bodyDepthM * 0.595);
+    group.add(throat);
+    for (const side of [-1, 1]) {
+      const upright = new THREE.Mesh(
+        new THREE.BoxGeometry(visual.bodyWidthM * 0.12, visual.bodyHeightM * 0.92, visual.ringTubeM * 1.8),
+        etch,
+      );
+      upright.position.set(side * visual.bodyWidthM * 0.42, visual.bodyHeightM * 0.5, -visual.bodyDepthM * 0.61);
+      group.add(upright);
+    }
+    const weapon = new THREE.Group();
+    const weaponBody = new THREE.Mesh(new THREE.BoxGeometry(visual.bodyWidthM * 0.42, visual.ringTubeM * 2.4, visual.chamberLengthM * 0.62), etch);
+    const weaponBarrel = new THREE.Mesh(new THREE.CylinderGeometry(visual.ringTubeM * 0.42, visual.ringTubeM * 0.55, visual.chamberLengthM * 0.54, 8), core);
+    weaponBarrel.rotation.x = Math.PI / 2;
+    weaponBarrel.position.z = -visual.chamberLengthM * 0.52;
+    weapon.add(weaponBody, weaponBarrel);
+    weapon.visible = false;
+    group.add(weapon);
+    const sparkPositions = new Float32Array(visual.sparkCount * 3);
+    for (let index = 0; index < visual.sparkCount; index += 1) {
+      const angle = index / visual.sparkCount * Math.PI * 2;
+      const radius = visual.chamberRadiusM * (0.38 + (index % 5) * 0.12);
+      sparkPositions[index * 3] = Math.cos(angle) * radius;
+      sparkPositions[index * 3 + 1] = visual.bodyHeightM * 0.74 + Math.sin(index * 2.17) * visual.chamberRadiusM;
+      sparkPositions[index * 3 + 2] = -visual.bodyDepthM * 0.62 + Math.sin(angle) * radius;
+    }
+    const sparkGeometry = new THREE.BufferGeometry();
+    sparkGeometry.setAttribute('position', new THREE.BufferAttribute(sparkPositions, 3));
+    const sparks = new THREE.Points(sparkGeometry, new THREE.PointsMaterial({
+      color: visual.emberColor,
+      size: visual.sparkRadiusM,
+      transparent: true,
+      opacity: 0,
+      depthWrite: false,
+    }));
+    sparks.visible = false;
+    group.add(sparks);
+    const light = new THREE.PointLight(visual.emberColor, 0, visual.lightDistanceM, 2);
+    light.position.set(0, visual.bodyHeightM * 0.78, -visual.bodyDepthM * 0.8);
+    group.add(light);
+    this.forgeVisual = { core, etch, light, sparks, weapon };
+    this.group.add(group);
   }
 
   private buildPowerAndPerks(steel: THREE.Material): void {

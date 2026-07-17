@@ -1,7 +1,7 @@
 import { randomBytes, randomInt } from 'node:crypto';
 import { Client, Room } from 'colyseus';
 import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../../src/config.js';
-import { START_POSITIONS } from '../../src/map/blueprint.js';
+import { DOORS, START_POSITIONS } from '../../src/map/blueprint.js';
 import {
   createCollisionWorld,
   resolvePlayerSeparation,
@@ -35,7 +35,7 @@ interface ActionMessage {
 
 interface GateMessage {
   version: number;
-  type: 'grantPoints' | 'teleport' | 'grantWeapon' | 'grantPerk' | 'setPower' | 'spawnPowerup' | 'damage' | 'startRound' | 'killAll';
+  type: 'grantPoints' | 'teleport' | 'grantWeapon' | 'grantPerk' | 'setPower' | 'spawnPowerup' | 'damage' | 'startRound' | 'killAll' | 'openDoors' | 'spawnWonderPack' | 'aimNearest';
   x?: number;
   y?: number;
   z?: number;
@@ -44,6 +44,7 @@ interface GateMessage {
   powerupType?: string;
   damage?: number;
   round?: number;
+  hitbox?: 'body' | 'head';
 }
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -155,6 +156,15 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       if (action.type === 'fire') {
         const result = simulation.fire(player, action.ads === true);
         client.send('combatFeedback', { source: 'fire', ...result });
+        if (result.accepted && (result.weaponId === 'blitzwerfer' || result.weaponId === 'sonnenpistole')) {
+          this.broadcast('gameEvent', {
+            type: 'wonderFired',
+            playerId: player.id,
+            weaponId: result.weaponId,
+            affectedEnemyIds: result.affectedEnemyIds,
+            impact: result.impact,
+          });
+        }
         if (result.points > 0) this.logPointTransaction(player.id, result.points, result.headshot ? 'headshot bullet' : 'body bullet');
       }
       if (action.type === 'reload') client.send('reloadFeedback', simulation.requestReload(player.id));
@@ -192,6 +202,9 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         simulation.grantPerk(player, message.perkId as PerkId);
       }
       if (message.type === 'setPower') simulation.setPowerOn(true);
+      if (message.type === 'openDoors') {
+        for (const door of DOORS) simulation.setDoorOpen(door.id, true);
+      }
       if (message.type === 'spawnPowerup' && isPowerupId(message.powerupType)) {
         simulation.debugSpawnPowerup(message.powerupType, player.x, player.y, player.z);
       }
@@ -203,6 +216,22 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         simulation.debugStartRound(round, [...this.state.players.values()]);
       }
       if (message.type === 'killAll') simulation.killAll();
+      if (message.type === 'spawnWonderPack') simulation.debugSpawnWonderPack(player, [...this.state.players.values()]);
+      if (message.type === 'aimNearest') {
+        const target = [...simulation.enemies.values()]
+          .filter((enemy) => enemy.state !== 'dead')
+          .sort((left, right) => Math.hypot(left.x - player.x, left.z - player.z) - Math.hypot(right.x - player.x, right.z - player.z))[0];
+        if (target !== undefined) {
+          const dx = target.x - player.x;
+          const dz = target.z - player.z;
+          const distance = Math.hypot(dx, dz);
+          const targetHeight = message.hitbox === 'head'
+            ? CONFIG.combat.headCenterHeightM
+            : (CONFIG.combat.bodyBottomHeightM + CONFIG.combat.bodyTopHeightM) / 2;
+          player.yaw = Math.atan2(-dx, -dz);
+          player.pitch = Math.atan2(target.y + targetHeight - (player.y + CONFIG.controller.eyeHeightM), distance);
+        }
+      }
       this.syncSimulation(simulation);
       client.send('gateAck', { accepted: true, type: message.type });
     });
@@ -328,6 +357,10 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.state.crateSpinRemainingMs = simulation.crate.spinRemainingMs;
     this.state.crateGrabRemainingMs = simulation.crate.grabRemainingMs;
     this.state.crateUsesAtLocation = simulation.crate.usesAtLocation;
+    this.state.forgePhase = simulation.forge.phase;
+    this.state.forgePlayerId = simulation.forge.playerId;
+    this.state.forgeWeaponId = simulation.forge.weaponId;
+    this.state.forgeRemainingMs = simulation.forge.remainingMs;
 
     for (const grenade of simulation.grenades.values()) this.syncGrenade(grenade);
     const activeGrenadeIds = new Set([...simulation.grenades.keys()].map(String));
@@ -392,6 +425,9 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       if (event.type === 'playerDamaged') {
         this.clientBySessionId(event.playerId)?.send('damageFeedback', { amount: event.damage, enemyId: event.enemyId });
       }
+      if (event.type === 'playerSelfDamaged') {
+        this.clientBySessionId(event.playerId)?.send('damageFeedback', { amount: event.damage, enemyId: 0 });
+      }
       if (event.type === 'pointTransaction') {
         this.clientBySessionId(event.playerId)?.send('pointTransaction', { amount: event.amount, reason: event.reason });
         this.logPointTransaction(event.playerId, event.amount, event.reason);
@@ -399,6 +435,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       if (event.type === 'powerActivated' || event.type === 'perkPurchaseStarted' || event.type === 'perkGranted'
         || event.type === 'powerupSpawned' || event.type === 'powerupCollected' || event.type === 'playerDowned'
         || event.type === 'playerRevived' || event.type === 'playerBledOut' || event.type === 'playerReturned'
+        || event.type === 'forgeStarted' || event.type === 'forgeCompleted' || event.type === 'forgeCancelled'
         || event.type === 'gameOver') this.broadcast('gameEvent', event);
     }
   }

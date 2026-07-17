@@ -126,6 +126,10 @@ export class BunkerState extends Schema {
   @type('float32') crateSpinRemainingMs: number = 0;
   @type('float32') crateGrabRemainingMs: number = 0;
   @type('uint16') crateUsesAtLocation: number = 0;
+  @type('string') forgePhase: string = 'idle';
+  @type('string') forgePlayerId: string = '';
+  @type('string') forgeWeaponId: string = '';
+  @type('float32') forgeRemainingMs: number = 0;
   @type({ map: NetPlayer }) players: MapSchema<NetPlayer> = new MapSchema<NetPlayer>();
   @type({ map: NetBarrier }) barriers: MapSchema<NetBarrier> = new MapSchema<NetBarrier>();
   @type({ map: NetEnemy }) enemies: MapSchema<NetEnemy> = new MapSchema<NetEnemy>();

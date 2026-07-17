@@ -87,6 +87,7 @@ export interface GameSnapshot {
   queued: number;
   elapsedMs: number;
   powerOn: boolean;
+  forge: { phase: 'idle' | 'upgrading'; playerId: string; weaponId: WeaponId | ''; remainingMs: number };
   doorsOpen: boolean[];
   players: PlayerState[];
   enemies: EnemyState[];

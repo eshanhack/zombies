@@ -76,6 +76,10 @@ interface WireState {
   crateSpinRemainingMs: number;
   crateGrabRemainingMs: number;
   crateUsesAtLocation: number;
+  forgePhase: string;
+  forgePlayerId: string;
+  forgeWeaponId: string;
+  forgeRemainingMs: number;
   players: {
     forEach(callback: (player: WirePlayer, key: string) => void): void;
   };
@@ -134,6 +138,7 @@ export interface NetworkGameView {
   powerups: NetworkPowerupView[];
   openDoors: string[];
   crate: NetworkCrateView;
+  forge: NetworkForgeView;
   localHp: number;
   localMaxHp: number;
   localPoints: number;
@@ -194,6 +199,13 @@ export interface NetworkCrateView {
   spinRemainingMs: number;
   grabRemainingMs: number;
   usesAtLocation: number;
+}
+
+export interface NetworkForgeView {
+  phase: 'idle' | 'upgrading';
+  playerId: string;
+  weaponId: WeaponId | '';
+  remainingMs: number;
 }
 
 export interface NetworkWeaponView {
@@ -559,6 +571,12 @@ export class CoopClient {
         spinRemainingMs: state.crateSpinRemainingMs,
         grabRemainingMs: state.crateGrabRemainingMs,
         usesAtLocation: state.crateUsesAtLocation,
+      },
+      forge: {
+        phase: state.forgePhase === 'upgrading' ? 'upgrading' : 'idle',
+        playerId: state.forgePlayerId,
+        weaponId: state.forgeWeaponId === '' ? '' : normalizeWeaponId(state.forgeWeaponId),
+        remainingMs: state.forgeRemainingMs,
       },
       localHp,
       localMaxHp,

@@ -79,7 +79,7 @@ export class AppShell {
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P5 POWER / LIFE / WOLVES</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P6 FORGE / WONDER SYSTEMS</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -113,6 +113,11 @@ export class AppShell {
         <button data-debug-action="perk">Cycle perk</button>
         <button data-debug-action="powerup">Cycle power-up</button>
         <button data-debug-action="wolves">Start wolf round</button>
+        <button data-debug-action="wonder">Cycle wonder weapon</button>
+        <button data-debug-action="forge">Upgrade active weapon</button>
+        <button data-debug-action="pack">Spawn round-25 ten-pack</button>
+        <button data-debug-action="fire">Fire active weapon</button>
+        <button data-debug-action="forgeview">Stage Forge visual gate</button>
       </div>
     `;
     this.metricValue = this.overlay.querySelector('[data-debug="metrics"]') as HTMLElement;
@@ -257,7 +262,7 @@ export class AppShell {
             combat.instaKillRemainingMs > 0 ? `IK ${(combat.instaKillRemainingMs / 1000).toFixed(1)}` : '',
             combat.doublePointsRemainingMs > 0 ? `2X ${(combat.doublePointsRemainingMs / 1000).toFixed(1)}` : '',
           ].filter(Boolean).join(' / ') || 'none';
-          systems.textContent = `${combat.powerOn ? 'ON' : 'OFF'} · ${combat.perks.length} · ${activeEffects}`;
+          systems.textContent = `${combat.powerOn ? 'ON' : 'OFF'} · ${combat.perks.length} · ${activeEffects} · Forge ${combat.forge.phase}`;
         }
         const species = this.overlay.querySelector<HTMLElement>('[data-debug="species"]');
         if (species !== null && combat !== null) species.textContent = `${combat.roundKind} · next wolves ${combat.nextWolfRound}`;

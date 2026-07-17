@@ -1,11 +1,11 @@
 import * as THREE from 'three';
 import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../config.js';
 import { AudioSystem } from '../audio/AudioSystem.js';
-import { CRATE_LOCATIONS, DOORS, PERK_MACHINES, POWER_SWITCH, START_POSITIONS, WALL_BUYS, WINDOWS } from '../map/blueprint.js';
+import { CRATE_LOCATIONS, DOORS, FORGE, PERK_MACHINES, POWER_SWITCH, START_POSITIONS, WALL_BUYS, WINDOWS } from '../map/blueprint.js';
 import { SeededRng } from '../shared/rng.js';
 import type { MovementInput } from '../shared/movement.js';
 import { GameSimulation, type SimCrateState, type SimGrenade, type SimPlayer } from '../shared/GameSimulation.js';
-import { type CombatPlayerState, type FireResult, type RuntimeWeaponState } from '../shared/combat.js';
+import { activeWeapon, type CombatPlayerState, type FireResult, type RuntimeWeaponState, weaponMagazineCapacity } from '../shared/combat.js';
 import { BunkerMap } from './BunkerMap.js';
 import { EnemyRenderer, type EnemyVisualState } from './EnemyRenderer.js';
 import { FirstPersonController, type AuthoritativePlayerState, type ControllerReadout } from './FirstPersonController.js';
@@ -73,6 +73,7 @@ export interface SceneSimulationReadout {
   thrownGrenades: readonly Pick<SimGrenade, 'id' | 'ownerId' | 'x' | 'y' | 'z' | 'fuseRemainingMs'>[];
   openDoors: readonly string[];
   crate: Readonly<SimCrateState>;
+  forge: { phase: 'idle' | 'upgrading'; playerId: string; weaponId: WeaponId | ''; remainingMs: number };
   localPlayerId: string;
   barriers: readonly { id: string; room: string; boards: number; repairProgressMs: number }[];
   enemies: readonly SceneEnemyReadout[];
@@ -107,6 +108,14 @@ interface RemoteVisual {
   targetDowned: boolean;
 }
 
+interface TransientWonderEffect {
+  group: THREE.Group;
+  materials: (THREE.LineBasicMaterial | THREE.MeshBasicMaterial | THREE.PointsMaterial)[];
+  durationMs: number;
+  remainingMs: number;
+  expands: boolean;
+}
+
 export class PreludeScene {
   readonly canvas: HTMLCanvasElement;
   private readonly renderer: THREE.WebGLRenderer;
@@ -130,6 +139,8 @@ export class PreludeScene {
   private viewmodel: THREE.Group | null = null;
   private muzzleLight: THREE.PointLight | null = null;
   private viewmodelWeaponId: WeaponId = 'melder';
+  private viewmodelUpgraded = false;
+  private readonly wonderEffects: TransientWonderEffect[] = [];
   private mode: 'menu' | 'gameplay' = 'menu';
   private gameMode: 'solo' | 'coop' = 'solo';
   private frameHandle = 0;
@@ -148,6 +159,7 @@ export class PreludeScene {
   private debugWeaponIndex = 0;
   private debugPerkIndex = 0;
   private debugPowerupIndex = 0;
+  private debugWonderIndex = 0;
   private readonly hudEvents: HudEvent[] = [];
   private godMode = false;
   private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0 };
@@ -245,8 +257,9 @@ export class PreludeScene {
       onReload: this.handleReload,
       onSwitchWeapon: this.handleSwitchWeapon,
     });
-    this.viewmodel = this.buildViewmodel('melder');
+    this.viewmodel = this.buildViewmodel('melder', false);
     this.viewmodelWeaponId = 'melder';
+    this.viewmodelUpgraded = false;
     this.camera.add(this.viewmodel);
     this.gameplayElapsed = 0;
     this.fixedAccumulator = 0;
@@ -328,7 +341,7 @@ export class PreludeScene {
     }
     if (name === 'jager') {
       this.simulation.grantWeapon(this.soloPlayer.id, 'jaeger');
-      this.ensureViewmodelWeapon('jaeger');
+      this.ensureViewmodelWeapon('jaeger', false);
       return true;
     }
     if (name === 'arsenal') {
@@ -336,7 +349,7 @@ export class PreludeScene {
       this.debugWeaponIndex = (this.debugWeaponIndex + 1) % weapons.length;
       const weaponId = weapons[this.debugWeaponIndex] ?? 'melder';
       this.simulation.grantWeapon(this.soloPlayer.id, weaponId);
-      this.ensureViewmodelWeapon(weaponId);
+      this.ensureViewmodelWeapon(weaponId, false);
       return true;
     }
     if (name === 'target') {
@@ -379,6 +392,75 @@ export class PreludeScene {
       this.simulation.nextWolfRound = this.simulation.round;
       this.simulation.debugStartRound(this.simulation.round, [this.soloPlayer]);
       return true;
+    }
+    if (name === 'wonder') {
+      const wonders = ['blitzwerfer', 'sonnenpistole'] as const;
+      const weaponId = wonders[this.debugWonderIndex % wonders.length] ?? 'blitzwerfer';
+      this.debugWonderIndex += 1;
+      this.simulation.grantWeapon(this.soloPlayer.id, weaponId);
+      this.ensureViewmodelWeapon(weaponId, false);
+      return true;
+    }
+    if (name === 'forge') {
+      const weapon = this.simulation.debugUpgradeActiveWeapon(this.soloPlayer.id);
+      this.ensureViewmodelWeapon(weapon.id, true);
+      return true;
+    }
+    if (name === 'pack') {
+      this.godMode = true;
+      this.simulation.gameOver = false;
+      this.soloPlayer.downed = false;
+      this.soloPlayer.spectating = false;
+      this.soloPlayer.hp = this.soloPlayer.maxHp;
+      this.soloPlayer.invulnerableUntilMs = Number.POSITIVE_INFINITY;
+      const life = this.simulation.getLifeState(this.soloPlayer.id);
+      life.dead = false;
+      life.bleedoutRemainingMs = 0;
+      life.selfReviveRemainingMs = 0;
+      this.simulation.debugSpawnWonderPack(this.soloPlayer, [this.soloPlayer]);
+      return true;
+    }
+    if (name === 'fire') {
+      const controller = this.controller?.getReadout();
+      if (controller === undefined) return false;
+      this.syncSoloPose(controller);
+      const result = this.simulation.fire(this.soloPlayer, controller.ads);
+      if (!result.accepted) return false;
+      this.playLocalShot(result.weaponId);
+      this.processFireResult(result);
+      return true;
+    }
+    if (name === 'forgeview') {
+      for (const door of DOORS) {
+        this.simulation.setDoorOpen(door.id, true);
+        this.bunkerMap?.setDoorOpen(door.id, true);
+      }
+      this.simulation.setPowerOn(true);
+      this.soloPlayer.points = Math.max(this.soloPlayer.points, CONFIG.economy.forgeUpgrade);
+      this.soloPlayer.invulnerableUntilMs = Number.POSITIVE_INFINITY;
+      this.godMode = true;
+      const combat = this.simulation.grantWeapon(this.soloPlayer.id, 'jaeger');
+      const stagedWeapon = activeWeapon(combat);
+      stagedWeapon.upgraded = false;
+      stagedWeapon.magazine = CONFIG.weapons.jaeger.magazine;
+      stagedWeapon.reserve = CONFIG.weapons.jaeger.reserve;
+      this.ensureViewmodelWeapon('jaeger', false);
+      this.controller?.debugSetPose(FORGE.x, FORGE.y, FORGE.z + CONFIG.controller.interactionRangeM * 0.94, 0, -0.16);
+      const pose = this.controller?.getReadout();
+      if (pose !== undefined) this.syncSoloPose(pose);
+      this.simulation.setInteractionHeld(this.soloPlayer.id, true);
+      let remainingMs = CONFIG.controller.interactionHoldMs;
+      while (remainingMs > 0) {
+        const deltaMs = Math.min(remainingMs, CONFIG.simulation.maxFrameDeltaMs);
+        this.simulation.update(deltaMs, [this.soloPlayer]);
+        remainingMs -= deltaMs;
+      }
+      this.simulation.setInteractionHeld(this.soloPlayer.id, false);
+      this.controller?.debugSetPose(FORGE.x, FORGE.y, FORGE.z + CONFIG.controller.interactionRangeM * 1.35, 0, -0.12);
+      const viewingPose = this.controller?.getReadout();
+      if (viewingPose !== undefined) this.syncSoloPose(viewingPose);
+      this.processSoloEvents(this.simulation.drainEvents());
+      return this.simulation.forge.phase === 'upgrading';
     }
     return false;
   }
@@ -440,6 +522,7 @@ export class PreludeScene {
         thrownGrenades: [...this.simulation.grenades.values()],
         openDoors: [...this.simulation.openDoors],
         crate: this.simulation.crate,
+        forge: this.simulation.forge,
         localPlayerId: this.soloPlayer.id,
         barriers: [...this.simulation.barriers.values()],
         enemies: [...this.simulation.enemies.values()].map(toEnemyVisual),
@@ -496,6 +579,7 @@ export class PreludeScene {
         thrownGrenades: network.grenades,
         openDoors: network.openDoors,
         crate: network.crate,
+        forge: network.forge,
         localPlayerId: network.localPlayerId,
         barriers: network.barriers,
         enemies: network.enemies.map(toEnemyVisual),
@@ -539,8 +623,10 @@ export class PreludeScene {
       const distance = Math.hypot(controller.x - wall.x, controller.y + CONFIG.controller.eyeHeightM - wall.y, controller.z - wall.z);
       if (wall.kind === 'grenades') add(distance, `Hold F for Frag Grenades ×4 [Cost: ${wall.cost}]`);
       else if (wall.weaponId !== undefined) {
-        const owned = readout.weapons.some((weapon) => weapon.id === wall.weaponId);
-        const cost = owned ? Math.round(wall.cost * CONFIG.economy.wallAmmoFactor) : wall.cost;
+        const owned = readout.weapons.find((weapon) => weapon.id === wall.weaponId);
+        const cost = owned === undefined
+          ? wall.cost
+          : owned.upgraded ? CONFIG.economy.upgradedWallAmmo : Math.round(wall.cost * CONFIG.economy.wallAmmoFactor);
         add(distance, `Hold F for ${CONFIG.weapons[wall.weaponId].name}${owned ? ' Ammo' : ''} [Cost: ${cost}]`);
       }
     }
@@ -561,6 +647,16 @@ export class PreludeScene {
         const cost = machine.id === 'zweiterAtem' && this.gameMode === 'solo' ? CONFIG.perks.zweiterAtem.costSolo : CONFIG.perks[machine.id].cost;
         add(distance, `Hold F for ${CONFIG.perkRuntime.displayNames[machine.id]} [Cost: ${cost}]`);
       }
+    }
+    const forgeDistance = Math.hypot(controller.x - FORGE.x, controller.y - FORGE.y, controller.z - FORGE.z);
+    const currentWeapon = readout.weapons[readout.activeWeaponIndex];
+    if (!readout.powerOn) add(forgeDistance, 'Power must be activated first');
+    else if (readout.forge.phase === 'upgrading') {
+      add(forgeDistance, readout.forge.playerId === readout.localPlayerId ? 'Die Schmiede is upgrading your weapon' : 'Die Schmiede is occupied');
+    } else if (currentWeapon?.upgraded) {
+      add(forgeDistance, `${CONFIG.forge.namePrefix}${CONFIG.weapons[currentWeapon.id].name} is already forged`);
+    } else if (currentWeapon !== undefined) {
+      add(forgeDistance, `Hold F to upgrade ${CONFIG.weapons[currentWeapon.id].name} [Cost: ${CONFIG.economy.forgeUpgrade}]`);
     }
     candidates.sort((left, right) => left.distance - right.distance);
     return candidates[0]?.prompt ?? null;
@@ -675,7 +771,7 @@ export class PreludeScene {
     return new THREE.Points(geometry, new THREE.PointsMaterial({ size: 0.045, transparent: true, opacity: 0.4, vertexColors: true, depthWrite: false }));
   }
 
-  private buildViewmodel(weaponId: WeaponId): THREE.Group {
+  private buildViewmodel(weaponId: WeaponId, upgraded: boolean): THREE.Group {
     const group = new THREE.Group();
     group.name = `${weaponId}-viewmodel`;
     const metal = new THREE.MeshStandardMaterial({ color: 0x242827, roughness: 0.46, metalness: 0.74 });
@@ -766,9 +862,64 @@ export class PreludeScene {
       addBarrel(0.012, 0.52, [-0.13, -0.11, -0.8], metal).rotation.z = -0.2;
       addBarrel(0.012, 0.52, [0.13, -0.11, -0.8], metal).rotation.z = 0.2;
       group.scale.setScalar(1.08);
-    } else {
-      addBox([0.2, 0.18, 0.62], [0, 0, -0.3], new THREE.MeshStandardMaterial({ color: CONFIG.weapons[weaponId].color, emissive: CONFIG.weapons[weaponId].color, emissiveIntensity: 0.24 }));
-      addBarrel(0.035, 0.55, [0, 0.02, -0.85]);
+    } else if (weaponId === 'blitzwerfer') {
+      const ceramic = new THREE.MeshStandardMaterial({ color: 0x253f50, emissive: CONFIG.rendering.wonderEffect.blitzColor, emissiveIntensity: 0.32, roughness: 0.3, metalness: 0.38 });
+      const conductor = new THREE.MeshStandardMaterial({ color: 0x8eb9c6, emissive: CONFIG.rendering.wonderEffect.blitzCoreColor, emissiveIntensity: 0.78, roughness: 0.2, metalness: 0.86 });
+      addBox([0.23, 0.2, 0.54], [0, -0.01, -0.23], ceramic);
+      addBox([0.14, 0.3, 0.16], [0, -0.2, 0.02], grip).rotation.x = -0.18;
+      for (const x of [-0.075, 0.075]) addBarrel(0.027, 0.62, [x, 0.035, -0.78], conductor);
+      for (const z of [-0.38, -0.53, -0.68]) {
+        const coil = new THREE.Mesh(new THREE.TorusGeometry(0.135, 0.014, 6, 18), conductor);
+        coil.position.set(0, 0.035, z);
+        group.add(coil);
+      }
+      for (const x of [-0.11, 0.11]) {
+        const tine = addBarrel(0.014, 0.22, [x, 0.035, -1.17], conductor);
+        tine.rotation.z = x < 0 ? -0.12 : 0.12;
+      }
+      group.scale.setScalar(0.82);
+    } else if (weaponId === 'sonnenpistole') {
+      const solar = new THREE.MeshStandardMaterial({ color: 0x51261b, emissive: CONFIG.rendering.wonderEffect.sunColor, emissiveIntensity: 0.34, roughness: 0.38, metalness: 0.62 });
+      const brass = new THREE.MeshStandardMaterial({ color: 0x99703c, emissive: CONFIG.rendering.wonderEffect.sunCoreColor, emissiveIntensity: 0.42, roughness: 0.28, metalness: 0.82 });
+      addBox([0.17, 0.15, 0.48], [0, 0, -0.18], solar);
+      addBox([0.12, 0.29, 0.14], [0, -0.18, 0.03], grip).rotation.x = -0.2;
+      addBarrel(0.04, 0.48, [0, 0.025, -0.62], brass);
+      const chamber = new THREE.Mesh(new THREE.SphereGeometry(0.13, 16, 10), solar);
+      chamber.scale.set(1, 0.78, 1.3);
+      chamber.position.set(0, 0.035, -0.35);
+      group.add(chamber);
+      for (const z of [-0.2, -0.3, -0.4, -0.5]) {
+        const fin = new THREE.Mesh(new THREE.BoxGeometry(0.27, 0.018, 0.035), brass);
+        fin.position.set(0, 0.08, z);
+        group.add(fin);
+      }
+      const muzzle = new THREE.Mesh(new THREE.TorusGeometry(0.075, 0.016, 8, 20), brass);
+      muzzle.position.set(0, 0.025, -0.88);
+      group.add(muzzle);
+      group.scale.setScalar(0.88);
+    }
+    if (upgraded) {
+      group.traverse((object) => {
+        if (!(object instanceof THREE.Mesh) || !(object.material instanceof THREE.MeshStandardMaterial)) return;
+        const material = object.material.clone();
+        material.color.multiplyScalar(0.58);
+        material.emissive.setHex(CONFIG.rendering.viewmodel.upgradedEtchColor);
+        material.emissiveIntensity = CONFIG.rendering.viewmodel.upgradedGlowIntensity * 0.24;
+        object.material = material;
+      });
+      const etchMaterial = new THREE.MeshStandardMaterial({
+        color: CONFIG.rendering.viewmodel.upgradedEtchColor,
+        emissive: CONFIG.rendering.viewmodel.upgradedEtchColor,
+        emissiveIntensity: CONFIG.rendering.viewmodel.upgradedGlowIntensity,
+        roughness: 0.28,
+        metalness: 0.52,
+      });
+      for (const z of [-0.2, -0.42, -0.64]) {
+        const rune = new THREE.Mesh(new THREE.TorusGeometry(0.105, 0.006, 5, 12, Math.PI * 1.35), etchMaterial);
+        rune.position.set(0, 0.105, z);
+        rune.rotation.z = z * 2.1;
+        group.add(rune);
+      }
     }
     const sleeve = new THREE.MeshStandardMaterial({ color: 0x343b36, roughness: 0.94 });
     const leftArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.34, 4, 8), sleeve);
@@ -796,15 +947,16 @@ export class PreludeScene {
     return group;
   }
 
-  private ensureViewmodelWeapon(weaponId: WeaponId): void {
-    if (weaponId === this.viewmodelWeaponId && this.viewmodel !== null) return;
+  private ensureViewmodelWeapon(weaponId: WeaponId, upgraded: boolean): void {
+    if (weaponId === this.viewmodelWeaponId && upgraded === this.viewmodelUpgraded && this.viewmodel !== null) return;
     const prior = this.viewmodel;
     if (prior !== null) {
       this.camera.remove(prior);
       this.disposeObject(prior);
     }
-    this.viewmodel = this.buildViewmodel(weaponId);
+    this.viewmodel = this.buildViewmodel(weaponId, upgraded);
     this.viewmodelWeaponId = weaponId;
+    this.viewmodelUpgraded = upgraded;
     this.camera.add(this.viewmodel);
   }
 
@@ -865,6 +1017,7 @@ export class PreludeScene {
     this.viewmodelRecoilM = THREE.MathUtils.lerp(this.viewmodelRecoilM, 0, Math.min(1, delta * 1000 / CONFIG.controller.recoilRecoveryMs));
     if (this.muzzleLight !== null) this.muzzleLight.intensity = this.muzzleRemainingMs > 0 ? CONFIG.rendering.muzzleLightIntensity : 0;
     this.updateViewmodel(controller.getReadout(), delta);
+    this.updateWonderEffects(delta * 1000);
     this.refreshSimulationVisuals();
     const interpolationAlpha = Math.min(1, delta / (CONFIG.coop.interpolationMs / 1000));
     for (const visual of this.remotePlayers.values()) {
@@ -877,7 +1030,7 @@ export class PreludeScene {
   private updateViewmodel(readout: ControllerReadout, delta: number): void {
     const simulation = this.getSimulationReadout();
     const weapon = simulation?.weapons[simulation.activeWeaponIndex];
-    if (weapon !== undefined) this.ensureViewmodelWeapon(weapon.id);
+    if (weapon !== undefined) this.ensureViewmodelWeapon(weapon.id, weapon.upgraded);
     const viewmodel = this.viewmodel;
     if (viewmodel === null) return;
     const speed = Math.hypot(readout.vx, readout.vz);
@@ -894,6 +1047,7 @@ export class PreludeScene {
     viewmodel.position.z = THREE.MathUtils.lerp(viewmodel.position.z, target[2] + this.viewmodelRecoilM, positionAlpha);
     const targetRoll = readout.sprinting ? CONFIG.rendering.viewmodel.sprintRollRad : Math.sin(this.gameplayElapsed * CONFIG.controller.bobFrequency * 0.5) * 0.018 * moveRatio;
     const rotationAlpha = 1 - Math.exp(-CONFIG.rendering.viewmodel.rotationLerpPerSecond * delta);
+    viewmodel.rotation.x = THREE.MathUtils.lerp(viewmodel.rotation.x, 0, rotationAlpha);
     viewmodel.rotation.z = THREE.MathUtils.lerp(viewmodel.rotation.z, targetRoll, rotationAlpha);
     const meleeProgress = this.meleeAnimationRemainingMs > 0
       ? 1 - this.meleeAnimationRemainingMs / CONFIG.melee.cooldownMs
@@ -912,6 +1066,11 @@ export class PreludeScene {
     const reloadArc = this.reloadAnimationRemainingMs > 0 ? Math.sin(reloadProgress * Math.PI) : 0;
     viewmodel.position.y -= reloadArc * CONFIG.rendering.viewmodel.reloadDropM;
     viewmodel.rotation.z += reloadArc * CONFIG.rendering.viewmodel.reloadRollRad;
+    const forgeActive = simulation?.forge.phase === 'upgrading' && simulation.forge.playerId === simulation.localPlayerId;
+    const forgeProgress = forgeActive ? 1 - simulation.forge.remainingMs / CONFIG.forge.animationMs : 0;
+    const forgeArc = forgeActive ? Math.sin(forgeProgress * Math.PI) : 0;
+    viewmodel.position.y -= forgeArc * CONFIG.rendering.viewmodel.forgeDropM;
+    viewmodel.rotation.x += forgeArc * CONFIG.rendering.viewmodel.forgePitchRad;
   }
 
   private refreshSimulationVisuals(): void {
@@ -925,6 +1084,7 @@ export class PreludeScene {
     this.bunkerMap?.updateGrenades(readout.thrownGrenades);
     this.bunkerMap?.updatePower(readout.powerOn, readout.powerActivationElapsedMs);
     this.bunkerMap?.updatePowerups(readout.powerups, readout.elapsedMs);
+    this.bunkerMap?.updateForge(readout.forge, readout.powerOn, readout.elapsedMs);
     const fog = this.scene.fog;
     if (fog instanceof THREE.Fog) {
       fog.color.setHex(readout.roundKind === 'wolves' ? CONFIG.rendering.wolfFog.color : CONFIG.rendering.fogColor);
@@ -974,7 +1134,7 @@ export class PreludeScene {
     const readout = this.getSimulationReadout();
     if (readout === null || readout.spectating || readout.gameOver) return;
     const weapon = readout.weapons[readout.activeWeaponIndex];
-    if (weapon === undefined || readout.reloading || weapon.reserve <= 0 || weapon.magazine >= CONFIG.weapons[weapon.id].magazine) return;
+    if (weapon === undefined || readout.reloading || weapon.reserve <= 0 || weapon.magazine >= weaponMagazineCapacity(weapon)) return;
     if (this.gameMode === 'coop') {
       this.sendAction?.({ type: 'reload' });
     } else if (this.simulation !== null && this.soloPlayer !== null) {
@@ -994,7 +1154,7 @@ export class PreludeScene {
     else if (this.soloPlayer !== null && !this.simulation?.switchWeapon(this.soloPlayer.id, index)) return;
     this.reloadAnimationRemainingMs = 0;
     this.nextCosmeticFireAtMs = this.gameplayElapsed * 1000 + CONFIG.controller.weaponSwitchMs;
-    this.ensureViewmodelWeapon(readout.weapons[index]!.id);
+    this.ensureViewmodelWeapon(readout.weapons[index]!.id, readout.weapons[index]!.upgraded);
   };
 
   private playLocalShot(weaponId: WeaponId): void {
@@ -1010,6 +1170,9 @@ export class PreludeScene {
   private processFireResult(result: FireResult): void {
     if (result.hit) this.recordHit(result.headshot, result.killed);
     if (result.points !== 0) this.recordPoints(result.points, result.headshot ? 'headshot' : result.killed ? 'body kill' : 'bullet hit');
+    if ((result.weaponId === 'blitzwerfer' || result.weaponId === 'sonnenpistole') && result.impact !== null) {
+      this.playWonderEffect(result.weaponId, result.affectedEnemyIds, result.impact, this.getSimulationReadout()?.localPlayerId ?? '');
+    }
   }
 
   private processSoloEvents(events: ReturnType<GameSimulation['drainEvents']>): void {
@@ -1024,6 +1187,124 @@ export class PreludeScene {
   private processGameEvent(event: { type: string; [key: string]: unknown }): void {
     if (event.type === 'powerupCollected' && typeof event.powerupType === 'string') {
       this.pushHudEvent({ type: 'points', amount: 0, reason: event.powerupType });
+    }
+    if (event.type === 'wonderFired' && (event.weaponId === 'blitzwerfer' || event.weaponId === 'sonnenpistole')
+      && Array.isArray(event.affectedEnemyIds) && event.impact !== null && typeof event.impact === 'object') {
+      const impact = event.impact as { x?: unknown; y?: unknown; z?: unknown };
+      if (typeof impact.x === 'number' && typeof impact.y === 'number' && typeof impact.z === 'number') {
+        const affected = event.affectedEnemyIds.filter((value): value is number => typeof value === 'number');
+        this.playWonderEffect(event.weaponId, affected, { x: impact.x, y: impact.y, z: impact.z }, typeof event.playerId === 'string' ? event.playerId : '');
+      }
+    }
+  }
+
+  private playWonderEffect(
+    weaponId: 'blitzwerfer' | 'sonnenpistole',
+    affectedEnemyIds: readonly number[],
+    impact: { x: number; y: number; z: number },
+    playerId: string,
+  ): void {
+    const readout = this.getSimulationReadout();
+    if (readout === null) return;
+    const group = new THREE.Group();
+    const materials: TransientWonderEffect['materials'] = [];
+    if (weaponId === 'blitzwerfer') {
+      const controller = this.controller?.getReadout();
+      const shooter = readout.players.find((player) => player.id === playerId);
+      const origin = shooter === undefined || playerId === readout.localPlayerId
+        ? { x: controller?.x ?? 0, y: (controller?.y ?? 0) + CONFIG.controller.eyeHeightM, z: controller?.z ?? 0 }
+        : { x: shooter.x, y: shooter.y + CONFIG.controller.eyeHeightM, z: shooter.z };
+      const targets = affectedEnemyIds
+        .map((id) => readout.enemies.find((enemy) => enemy.id === id))
+        .filter((enemy): enemy is SceneEnemyReadout => enemy !== undefined)
+        .map((enemy) => ({ x: enemy.x, y: enemy.y + CONFIG.combat.bodyTopHeightM * 0.62, z: enemy.z }));
+      const nodes = [origin, ...targets];
+      for (let linkIndex = 0; linkIndex < nodes.length - 1; linkIndex += 1) {
+        const from = nodes[linkIndex]!;
+        const to = nodes[linkIndex + 1]!;
+        const positions: number[] = [];
+        let prior = from;
+        for (let segment = 1; segment <= CONFIG.rendering.wonderEffect.blitzSegments; segment += 1) {
+          const alpha = segment / CONFIG.rendering.wonderEffect.blitzSegments;
+          const endpoint = segment === CONFIG.rendering.wonderEffect.blitzSegments;
+          const current = {
+            x: THREE.MathUtils.lerp(from.x, to.x, alpha) + (endpoint ? 0 : (this.cosmeticRng.next() * 2 - 1) * CONFIG.rendering.wonderEffect.blitzJitterM),
+            y: THREE.MathUtils.lerp(from.y, to.y, alpha) + (endpoint ? 0 : (this.cosmeticRng.next() * 2 - 1) * CONFIG.rendering.wonderEffect.blitzJitterM),
+            z: THREE.MathUtils.lerp(from.z, to.z, alpha) + (endpoint ? 0 : (this.cosmeticRng.next() * 2 - 1) * CONFIG.rendering.wonderEffect.blitzJitterM),
+          };
+          positions.push(prior.x, prior.y, prior.z, current.x, current.y, current.z);
+          prior = current;
+        }
+        const material = new THREE.LineBasicMaterial({
+          color: linkIndex % 2 === 0 ? CONFIG.rendering.wonderEffect.blitzColor : CONFIG.rendering.wonderEffect.blitzCoreColor,
+          transparent: true,
+          opacity: 1,
+          depthTest: false,
+          depthWrite: false,
+          blending: THREE.AdditiveBlending,
+          toneMapped: false,
+        });
+        materials.push(material);
+        group.add(new THREE.LineSegments(
+          new THREE.BufferGeometry().setAttribute('position', new THREE.Float32BufferAttribute(positions, 3)),
+          material,
+        ));
+      }
+      const nodeMaterial = new THREE.MeshBasicMaterial({
+        color: CONFIG.rendering.wonderEffect.blitzCoreColor,
+        transparent: true,
+        opacity: 1,
+        depthTest: false,
+        depthWrite: false,
+        blending: THREE.AdditiveBlending,
+        toneMapped: false,
+      });
+      materials.push(nodeMaterial);
+      for (const node of nodes.slice(1)) {
+        const pulse = new THREE.Mesh(new THREE.SphereGeometry(CONFIG.rendering.wonderEffect.blitzNodeRadiusM, 8, 6), nodeMaterial);
+        pulse.position.set(node.x, node.y, node.z);
+        group.add(pulse);
+      }
+      this.wonderEffects.push({ group, materials, durationMs: CONFIG.rendering.wonderEffect.blitzDurationMs, remainingMs: CONFIG.rendering.wonderEffect.blitzDurationMs, expands: false });
+    } else {
+      group.position.set(impact.x, impact.y, impact.z);
+      const coreMaterial = new THREE.MeshBasicMaterial({ color: CONFIG.rendering.wonderEffect.sunCoreColor, transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+      const ringMaterial = new THREE.MeshBasicMaterial({ color: CONFIG.rendering.wonderEffect.sunColor, transparent: true, opacity: 0.9, depthWrite: false, side: THREE.DoubleSide, blending: THREE.AdditiveBlending, toneMapped: false });
+      materials.push(coreMaterial, ringMaterial);
+      group.add(new THREE.Mesh(new THREE.SphereGeometry(CONFIG.rendering.wonderEffect.sunCoreRadiusM, 16, 10), coreMaterial));
+      const ring = new THREE.Mesh(new THREE.TorusGeometry(CONFIG.rendering.wonderEffect.sunRingRadiusM, CONFIG.rendering.wonderEffect.sunParticleSizeM, 8, CONFIG.rendering.wonderEffect.sunRingSegments), ringMaterial);
+      ring.rotation.x = Math.PI / 2;
+      group.add(ring);
+      const particles = new Float32Array(CONFIG.rendering.wonderEffect.sunParticleCount * 3);
+      for (let index = 0; index < CONFIG.rendering.wonderEffect.sunParticleCount; index += 1) {
+        const theta = index / CONFIG.rendering.wonderEffect.sunParticleCount * Math.PI * 2;
+        const phi = Math.acos(1 - 2 * ((index + 0.5) / CONFIG.rendering.wonderEffect.sunParticleCount));
+        particles[index * 3] = Math.sin(phi) * Math.cos(theta);
+        particles[index * 3 + 1] = Math.cos(phi);
+        particles[index * 3 + 2] = Math.sin(phi) * Math.sin(theta);
+      }
+      const particleMaterial = new THREE.PointsMaterial({ color: CONFIG.rendering.wonderEffect.sunColor, size: CONFIG.rendering.wonderEffect.sunParticleSizeM, transparent: true, opacity: 1, depthWrite: false, blending: THREE.AdditiveBlending, toneMapped: false });
+      materials.push(particleMaterial);
+      group.add(new THREE.Points(new THREE.BufferGeometry().setAttribute('position', new THREE.BufferAttribute(particles, 3)), particleMaterial));
+      this.wonderEffects.push({ group, materials, durationMs: CONFIG.rendering.wonderEffect.sunDurationMs, remainingMs: CONFIG.rendering.wonderEffect.sunDurationMs, expands: true });
+    }
+    this.scene.add(group);
+  }
+
+  private updateWonderEffects(deltaMs: number): void {
+    for (let index = this.wonderEffects.length - 1; index >= 0; index -= 1) {
+      const effect = this.wonderEffects[index]!;
+      effect.remainingMs = Math.max(0, effect.remainingMs - deltaMs);
+      const life = effect.remainingMs / effect.durationMs;
+      for (const material of effect.materials) material.opacity = life;
+      if (effect.expands) {
+        const scale = 1 + (1 - life) * CONFIG.wonder.sunSplashRadiusM;
+        effect.group.scale.setScalar(scale);
+      }
+      if (effect.remainingMs > 0) continue;
+      this.scene.remove(effect.group);
+      this.disposeObject(effect.group);
+      this.wonderEffects.splice(index, 1);
     }
   }
 

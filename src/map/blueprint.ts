@@ -68,6 +68,15 @@ export interface FogBankBlueprint {
   z: number;
 }
 
+export interface ForgeBlueprint {
+  id: 'catwalk-forge';
+  room: 'catwalk';
+  x: number;
+  y: number;
+  z: number;
+  yaw: number;
+}
+
 export type WindowFacing = 'north' | 'south' | 'east' | 'west';
 
 export interface WindowBlueprint {
@@ -122,6 +131,15 @@ export const POWER_SWITCH = {
   x: 2.05,
   y: 1.2,
   z: 16.62,
+  yaw: Math.PI,
+} as const;
+
+export const FORGE: ForgeBlueprint = {
+  id: 'catwalk-forge',
+  room: 'catwalk',
+  x: 10.85,
+  y: CONFIG.map.catwalkY,
+  z: 8.72,
   yaw: Math.PI,
 } as const;
 

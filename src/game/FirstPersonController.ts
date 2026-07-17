@@ -167,6 +167,20 @@ export class FirstPersonController {
     return this.setNoclip(!this.noclip);
   }
 
+  debugSetPose(x: number, y: number, z: number, yaw: number, pitch: number): void {
+    this.state.x = x;
+    this.state.y = y;
+    this.state.z = z;
+    this.state.vx = 0;
+    this.state.vy = 0;
+    this.state.vz = 0;
+    this.state.grounded = true;
+    this.yaw = yaw;
+    this.pitch = THREE.MathUtils.clamp(pitch, -CONFIG.controller.pitchLimitRad, CONFIG.controller.pitchLimitRad);
+    this.recoilYaw = 0;
+    this.recoilPitch = 0;
+  }
+
   getReadout(): ControllerReadout {
     return {
       ...this.state,

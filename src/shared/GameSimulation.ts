@@ -3,6 +3,7 @@ import {
   CRATE_LOCATIONS,
   DOORS,
   FOG_BANKS,
+  FORGE,
   PERK_MACHINES,
   POWER_SWITCH,
   START_POSITIONS,
@@ -20,10 +21,12 @@ import {
   rayAabbDistance,
   raySphereDistance,
   shotDirection,
+  weaponMagazineCapacity,
   type CombatPlayerState,
   type FireResult,
   type ReloadResult,
   type RuntimeWeaponState,
+  type ShotVector,
 } from './combat.js';
 
 export type SimulationMode = 'solo' | 'coop';
@@ -129,6 +132,16 @@ export interface SimCrateState {
   usesAtLocation: number;
 }
 
+export type ForgePhase = 'idle' | 'upgrading';
+
+export interface SimForgeState {
+  phase: ForgePhase;
+  playerId: string;
+  weaponId: WeaponId | '';
+  weaponIndex: number;
+  remainingMs: number;
+}
+
 export type InteractionTarget =
   | { kind: 'revive'; id: string; prompt: string; cost: 0 }
   | { kind: 'barrier'; id: string; prompt: string; cost: 0 }
@@ -138,6 +151,7 @@ export type InteractionTarget =
   | { kind: 'crate'; id: string; prompt: string; cost: number }
   | { kind: 'power'; id: string; prompt: string; cost: 0 }
   | { kind: 'perk'; id: PerkId; prompt: string; cost: number }
+  | { kind: 'forge'; id: string; prompt: string; cost: number }
   | { kind: 'inactive'; id: string; prompt: string; cost: 0 };
 
 export interface MeleeResult {
@@ -170,6 +184,10 @@ export type SimulationEvent =
   | { type: 'powerActivated'; playerId: string }
   | { type: 'perkPurchaseStarted'; playerId: string; perkId: PerkId; cost: number }
   | { type: 'perkGranted'; playerId: string; perkId: PerkId }
+  | { type: 'forgeStarted'; playerId: string; weaponId: WeaponId; cost: number }
+  | { type: 'forgeCompleted'; playerId: string; weaponId: WeaponId; magazine: number; reserve: number }
+  | { type: 'forgeCancelled'; playerId: string; weaponId: WeaponId }
+  | { type: 'playerSelfDamaged'; playerId: string; damage: number }
   | { type: 'powerupSpawned'; powerupId: number; powerupType: PowerupId; guaranteed: boolean }
   | { type: 'powerupCollected'; powerupId: number; powerupType: PowerupId; playerId: string }
   | { type: 'playerDowned'; playerId: string; selfRevive: boolean }
@@ -202,6 +220,13 @@ export class GameSimulation {
     spinRemainingMs: 0,
     grabRemainingMs: 0,
     usesAtLocation: 0,
+  };
+  readonly forge: SimForgeState = {
+    phase: 'idle',
+    playerId: '',
+    weaponId: '',
+    weaponIndex: -1,
+    remainingMs: 0,
   };
   readonly seed: number;
   readonly mode: SimulationMode;
@@ -254,6 +279,7 @@ export class GameSimulation {
     this.updatePowerActivation(delta);
     this.updatePlayerLifecycle(delta, players);
     this.updateCombat(players);
+    this.updateForge(delta, players);
     this.updateCrate(delta, players);
     this.updateGrenades(delta, players);
     this.updatePowerups(delta, players);
@@ -343,7 +369,11 @@ export class GameSimulation {
       const weaponId = wallBuy.weaponId;
       if (weaponId === undefined) continue;
       const owned = combat.weapons.find((weapon) => weapon.id === weaponId);
-      const cost = owned === undefined ? wallBuy.cost : Math.round(wallBuy.cost * CONFIG.economy.wallAmmoFactor);
+      const cost = owned === undefined
+        ? wallBuy.cost
+        : owned.upgraded
+          ? CONFIG.economy.upgradedWallAmmo
+          : Math.round(wallBuy.cost * CONFIG.economy.wallAmmoFactor);
       const label = owned === undefined ? CONFIG.weapons[weaponId].name : `${CONFIG.weapons[weaponId].name} Ammo`;
       consider(distance, { kind: 'wallWeapon', id: wallBuy.id, weaponId, cost, prompt: `Hold F for ${label} [Cost: ${cost}]` });
     }
@@ -370,6 +400,25 @@ export class GameSimulation {
           id: machine.id,
           cost,
           prompt: `Hold F for ${CONFIG.perkRuntime.displayNames[machine.id]} [Cost: ${cost}]`,
+        });
+      }
+    }
+    if (this.isRoomUnlocked(FORGE.room)) {
+      const distance = Math.hypot(player.x - FORGE.x, player.y - FORGE.y, player.z - FORGE.z);
+      const weapon = activeWeapon(combat);
+      if (!this.powerOn) {
+        consider(distance, { kind: 'inactive', id: FORGE.id, cost: 0, prompt: 'Power must be activated first' });
+      } else if (this.forge.phase === 'upgrading') {
+        const prompt = this.forge.playerId === player.id ? 'Die Schmiede is upgrading your weapon' : 'Die Schmiede is occupied';
+        consider(distance, { kind: 'inactive', id: FORGE.id, cost: 0, prompt });
+      } else if (weapon.upgraded) {
+        consider(distance, { kind: 'inactive', id: FORGE.id, cost: 0, prompt: `${CONFIG.forge.namePrefix}${CONFIG.weapons[weapon.id].name} is already forged` });
+      } else {
+        consider(distance, {
+          kind: 'forge',
+          id: FORGE.id,
+          cost: CONFIG.economy.forgeUpgrade,
+          prompt: `Hold F to upgrade ${CONFIG.weapons[weapon.id].name} [Cost: ${CONFIG.economy.forgeUpgrade}]`,
         });
       }
     }
@@ -500,7 +549,8 @@ export class GameSimulation {
     const state = this.getCombatState(playerId);
     const weapon = activeWeapon(state);
     const definition = CONFIG.weapons[weapon.id];
-    const accepted = this.elapsedMs >= state.actionLockedUntilMs && state.reloadingWeaponIndex < 0 && weapon.magazine < definition.magazine && weapon.reserve > 0;
+    const accepted = this.elapsedMs >= state.actionLockedUntilMs && state.reloadingWeaponIndex < 0
+      && weapon.magazine < weaponMagazineCapacity(weapon) && weapon.reserve > 0;
     if (accepted) {
       state.reloadingWeaponIndex = state.activeWeaponIndex;
       const reloadMultiplier = state.perks.includes('schnellwasser') ? CONFIG.perkRuntime.schnellwasserReloadMultiplier : 1;
@@ -532,6 +582,8 @@ export class GameSimulation {
       pelletHits: 0,
       damage: 0,
       points: 0,
+      affectedEnemyIds: [],
+      impact: null,
     });
     if (!player.connected || player.spectating === true || this.elapsedMs < state.actionLockedUntilMs) return rejected('unavailable');
     if (state.reloadingWeaponIndex >= 0) {
@@ -547,15 +599,34 @@ export class GameSimulation {
     state.shots += 1;
     const origin = { x: player.x, y: player.y + CONFIG.controller.eyeHeightM, z: player.z };
     const damageMultiplier = weapon.upgraded ? CONFIG.forge.damageMultiplier : 1;
+    const spreadMultiplier = weapon.upgraded ? CONFIG.forge.spreadMultiplier : 1;
+    const direction = shotDirection(
+      player.yaw,
+      player.pitch,
+      (ads ? definition.spreadAds : definition.spreadHip) * spreadMultiplier,
+      this.rng.spread,
+    );
+    if (weapon.id === 'blitzwerfer') return this.fireBlitz(player, state, weapon, origin, direction);
+    if (weapon.id === 'sonnenpistole') return this.fireSonnenpistole(player, state, weapon, origin, direction, damageMultiplier);
+
     let pelletHits = 0;
     let totalDamage = 0;
     let totalPoints = 0;
     let anyHeadshot = false;
     let anyKilled = false;
     let lastEnemyId: number | null = null;
+    let impact: ShotVector | null = null;
+    const affectedEnemyIds = new Set<number>();
     for (let pellet = 0; pellet < definition.pellets; pellet += 1) {
-      const direction = shotDirection(player.yaw, player.pitch, ads ? definition.spreadAds : definition.spreadHip, this.rng.spread);
-      const target = this.nearestShotTarget(origin, direction);
+      const pelletDirection = pellet === 0
+        ? direction
+        : shotDirection(
+          player.yaw,
+          player.pitch,
+          (ads ? definition.spreadAds : definition.spreadHip) * spreadMultiplier,
+          this.rng.spread,
+        );
+      const target = this.nearestShotTarget(origin, pelletDirection);
       if (target === null) continue;
       let falloff = 1;
       if (definition.pellets > 1 && target.distance > CONFIG.combat.shotgunFalloffStartM) {
@@ -577,6 +648,12 @@ export class GameSimulation {
       anyHeadshot ||= target.headshot;
       anyKilled ||= killed;
       lastEnemyId = target.enemy.id;
+      affectedEnemyIds.add(target.enemy.id);
+      impact = {
+        x: origin.x + pelletDirection.x * target.distance,
+        y: origin.y + pelletDirection.y * target.distance,
+        z: origin.z + pelletDirection.z * target.distance,
+      };
       if (killed) {
         state.kills += 1;
         if (target.headshot) state.headshots += 1;
@@ -598,7 +675,170 @@ export class GameSimulation {
       pelletHits,
       damage: totalDamage,
       points: totalPoints,
+      affectedEnemyIds: [...affectedEnemyIds],
+      impact,
     };
+  }
+
+  private fireBlitz(
+    player: SimPlayer,
+    state: CombatPlayerState,
+    weapon: RuntimeWeaponState,
+    origin: ShotVector,
+    direction: ShotVector,
+  ): FireResult {
+    const first = this.nearestShotTarget(origin, direction);
+    const affectedEnemyIds: number[] = [];
+    let totalDamage = 0;
+    if (first !== null) {
+      const visited = new Set<number>();
+      let current: SimEnemy | null = first.enemy;
+      while (current !== null && affectedEnemyIds.length < CONFIG.wonder.blitzChainTargets) {
+        visited.add(current.id);
+        affectedEnemyIds.push(current.id);
+        totalDamage += current.hp;
+        current.crawlerUntouchedMs = 0;
+        this.killEnemy(current, 'explosive', player.id);
+        let next: SimEnemy | null = null;
+        let nearestDistance = Number.POSITIVE_INFINITY;
+        for (const candidate of this.enemies.values()) {
+          if (candidate.state === 'dead' || visited.has(candidate.id)) continue;
+          const distance = Math.hypot(candidate.x - current.x, candidate.y - current.y, candidate.z - current.z);
+          if (distance > CONFIG.wonder.blitzChainRangeM || distance > nearestDistance
+            || (distance === nearestDistance && next !== null && candidate.id > next.id)) continue;
+          next = candidate;
+          nearestDistance = distance;
+        }
+        current = next;
+      }
+    }
+    const kills = affectedEnemyIds.length;
+    if (kills > 0) {
+      state.hits += 1;
+      state.kills += kills;
+    }
+    const points = kills > 0
+      ? this.awardPoints(player, kills * CONFIG.points.killExplosive, 'Blitzwerfer kill', false)
+      : 0;
+    return {
+      accepted: true,
+      reason: 'fired',
+      weaponId: weapon.id,
+      magazine: weapon.magazine,
+      reserve: weapon.reserve,
+      hit: kills > 0,
+      headshot: false,
+      killed: kills > 0,
+      enemyId: affectedEnemyIds[0] ?? null,
+      pelletHits: kills,
+      damage: totalDamage,
+      points,
+      affectedEnemyIds,
+      impact: first === null ? null : { x: first.enemy.x, y: first.enemy.y, z: first.enemy.z },
+    };
+  }
+
+  private fireSonnenpistole(
+    player: SimPlayer,
+    state: CombatPlayerState,
+    weapon: RuntimeWeaponState,
+    origin: ShotVector,
+    direction: ShotVector,
+    damageMultiplier: number,
+  ): FireResult {
+    const definition = CONFIG.weapons.sonnenpistole;
+    const direct = this.nearestShotTarget(origin, direction);
+    const impact: ShotVector = direct === null
+      ? {
+        x: origin.x + direction.x * CONFIG.combat.hitscanRangeM,
+        y: origin.y + direction.y * CONFIG.combat.hitscanRangeM,
+        z: origin.z + direction.z * CONFIG.combat.hitscanRangeM,
+      }
+      : {
+        x: origin.x + direction.x * direct.distance,
+        y: origin.y + direction.y * direct.distance,
+        z: origin.z + direction.z * direct.distance,
+      };
+    const affected = new Set<number>();
+    const killed = new Set<number>();
+    let totalDamage = 0;
+    if (direct !== null) {
+      const enemy = direct.enemy;
+      const before = enemy.hp;
+      const damage = this.effects.instaKillRemainingMs > 0
+        ? before
+        : definition.damage * (direct.headshot ? definition.headMultiplier : 1) * damageMultiplier;
+      enemy.hp = Math.max(0, before - damage);
+      enemy.crawlerUntouchedMs = 0;
+      totalDamage += before - enemy.hp;
+      affected.add(enemy.id);
+      if (enemy.hp === 0) {
+        killed.add(enemy.id);
+        this.killEnemy(enemy, 'explosive', player.id);
+      }
+    }
+    for (const enemy of this.enemies.values()) {
+      if (enemy.state === 'dead') continue;
+      const heightScale = enemy.kind === 'crawler' ? CONFIG.combat.crawlerHitboxHeightScale : 1;
+      const centerY = enemy.y + (CONFIG.combat.bodyBottomHeightM + CONFIG.combat.bodyTopHeightM) / 2 * heightScale;
+      const distance = Math.hypot(enemy.x - impact.x, centerY - impact.y, enemy.z - impact.z);
+      if (distance > CONFIG.wonder.sunSplashRadiusM) continue;
+      const before = enemy.hp;
+      const damage = definition.damage * damageMultiplier * this.sunSplashMultiplier(distance);
+      const canKill = this.effects.instaKillRemainingMs > 0 || distance <= CONFIG.wonder.sunSplashFullRadiusM;
+      if (canKill && (this.effects.instaKillRemainingMs > 0 || damage >= before)) {
+        totalDamage += before;
+        affected.add(enemy.id);
+        killed.add(enemy.id);
+        this.killEnemy(enemy, 'explosive', player.id);
+        continue;
+      }
+      enemy.hp = Math.max(1, before - damage);
+      totalDamage += before - enemy.hp;
+      affected.add(enemy.id);
+      enemy.crawlerUntouchedMs = 0;
+      if (enemy.kind !== 'wolf') {
+        enemy.kind = 'crawler';
+        enemy.speed = CONFIG.zombie.crawlerSpeed;
+      }
+    }
+    const selfDistance = Math.hypot(player.x - impact.x, player.z - impact.z);
+    if (selfDistance <= CONFIG.wonder.sunSplashRadiusM) {
+      const selfDamage = Math.round(
+        definition.damage * damageMultiplier * this.sunSplashMultiplier(selfDistance) * CONFIG.wonder.sunSelfDamageMultiplier,
+      );
+      if (selfDamage > 0 && this.damagePlayerAmount(player, selfDamage)) {
+        this.events.push({ type: 'playerSelfDamaged', playerId: player.id, damage: selfDamage });
+      }
+    }
+    if (affected.size > 0) state.hits += 1;
+    if (killed.size > 0) state.kills += killed.size;
+    const points = killed.size > 0
+      ? this.awardPoints(player, killed.size * CONFIG.points.killExplosive, 'Sonnenpistole kill', false)
+      : 0;
+    return {
+      accepted: true,
+      reason: 'fired',
+      weaponId: weapon.id,
+      magazine: weapon.magazine,
+      reserve: weapon.reserve,
+      hit: affected.size > 0,
+      headshot: direct?.headshot ?? false,
+      killed: killed.size > 0,
+      enemyId: direct?.enemy.id ?? null,
+      pelletHits: affected.size,
+      damage: totalDamage,
+      points,
+      affectedEnemyIds: [...affected],
+      impact,
+    };
+  }
+
+  private sunSplashMultiplier(distance: number): number {
+    if (distance <= CONFIG.wonder.sunSplashFullRadiusM) return 1;
+    const alpha = Math.min(1, (distance - CONFIG.wonder.sunSplashFullRadiusM)
+      / (CONFIG.wonder.sunSplashRadiusM - CONFIG.wonder.sunSplashFullRadiusM));
+    return lerp(1, CONFIG.wonder.sunSplashMinimumDamageMultiplier, alpha);
   }
 
   melee(player: SimPlayer): MeleeResult {
@@ -681,6 +921,42 @@ export class GameSimulation {
   debugStartRound(round: number, players: readonly SimPlayer[] = []): void {
     this.enemies.clear();
     this.beginRound(Math.max(1, Math.floor(round)), players);
+  }
+
+  debugSpawnWonderPack(player: SimPlayer, players: readonly SimPlayer[] = [player]): SimEnemy[] {
+    this.debugStartRound(CONFIG.debug.wonderGateRound, players);
+    const pack: SimEnemy[] = [];
+    for (let index = 0; index < CONFIG.debug.wonderPackCount; index += 1) {
+      const enemy = this.forceSpawn(players);
+      if (enemy === null) break;
+      const rowIndex = index === 0 ? 0 : Math.floor((index - 1) / CONFIG.debug.wonderPackColumns) + 1;
+      const columnIndex = index === 0 ? Math.floor(CONFIG.debug.wonderPackColumns / 2) : (index - 1) % CONFIG.debug.wonderPackColumns;
+      const centeredColumn = columnIndex - Math.floor(CONFIG.debug.wonderPackColumns / 2);
+      enemy.x = player.x + centeredColumn * CONFIG.debug.wonderPackSpacingM;
+      enemy.y = player.y;
+      enemy.z = player.z - CONFIG.debug.aimTargetDistanceM - rowIndex * CONFIG.debug.wonderPackSpacingM;
+      enemy.state = 'chase';
+      enemy.stateTimeMs = 0;
+      enemy.spawnProgress = 1;
+      enemy.hp = zombieHealth(CONFIG.debug.wonderGateRound);
+      enemy.maxHp = enemy.hp;
+      pack.push(enemy);
+    }
+    this.totalThisRound = pack.length;
+    this.spawnedThisRound = pack.length;
+    this.queued = 0;
+    this.spawnInMs = 0;
+    return pack;
+  }
+
+  debugUpgradeActiveWeapon(playerId: string): RuntimeWeaponState {
+    const combat = this.getCombatState(playerId);
+    const weapon = activeWeapon(combat);
+    weapon.upgraded = true;
+    weapon.magazine = weaponMagazineCapacity(weapon);
+    weapon.reserve = CONFIG.weapons[weapon.id].reserve;
+    weapon.readyAtMs = this.elapsedMs;
+    return weapon;
   }
 
   drainEvents(): SimulationEvent[] {
@@ -1008,6 +1284,21 @@ export class GameSimulation {
       this.events.push({ type: 'perkPurchaseStarted', playerId: player.id, perkId: target.id, cost: target.cost });
       return;
     }
+    if (target.kind === 'forge') {
+      const combat = this.getCombatState(player.id);
+      const weapon = activeWeapon(combat);
+      if (!this.powerOn || this.forge.phase !== 'idle' || weapon.upgraded
+        || !this.spendPoints(player, CONFIG.economy.forgeUpgrade, 'Forge upgrade')) return;
+      this.cancelReload(combat);
+      combat.actionLockedUntilMs = this.elapsedMs + CONFIG.forge.animationMs;
+      this.forge.phase = 'upgrading';
+      this.forge.playerId = player.id;
+      this.forge.weaponId = weapon.id;
+      this.forge.weaponIndex = combat.activeWeaponIndex;
+      this.forge.remainingMs = CONFIG.forge.animationMs;
+      this.events.push({ type: 'forgeStarted', playerId: player.id, weaponId: weapon.id, cost: CONFIG.economy.forgeUpgrade });
+      return;
+    }
     if (target.kind === 'door') {
       const door = DOORS.find((candidate) => candidate.id === target.id);
       if (door === undefined || this.openDoors.has(door.id) || !this.spendPoints(player, door.cost, 'door purchase')) return;
@@ -1032,7 +1323,9 @@ export class GameSimulation {
       const combat = this.getCombatState(player.id);
       const owned = combat.weapons.find((weapon) => weapon.id === target.weaponId);
       if (owned !== undefined) {
-        const cost = Math.round(wallBuy.cost * CONFIG.economy.wallAmmoFactor);
+        const cost = owned.upgraded
+          ? CONFIG.economy.upgradedWallAmmo
+          : Math.round(wallBuy.cost * CONFIG.economy.wallAmmoFactor);
         const reserveCapacity = CONFIG.weapons[owned.id].reserve;
         if (owned.reserve >= reserveCapacity || !this.spendPoints(player, cost, 'wall ammo')) return;
         owned.reserve = reserveCapacity;
@@ -1197,6 +1490,43 @@ export class GameSimulation {
   private updatePowerActivation(deltaMs: number): void {
     if (!this.powerOn || this.powerActivationElapsedMs >= CONFIG.power.activationMs) return;
     this.powerActivationElapsedMs = Math.min(CONFIG.power.activationMs, this.powerActivationElapsedMs + deltaMs);
+  }
+
+  private updateForge(deltaMs: number, players: readonly SimPlayer[]): void {
+    if (this.forge.phase !== 'upgrading') return;
+    this.forge.remainingMs = Math.max(0, this.forge.remainingMs - deltaMs);
+    if (this.forge.remainingMs > 0) return;
+    const playerId = this.forge.playerId;
+    const weaponId = this.forge.weaponId;
+    const player = players.find((candidate) => candidate.id === playerId);
+    const combat = this.combatByPlayer.get(playerId);
+    const weapon = combat?.weapons[this.forge.weaponIndex];
+    if (player === undefined || combat === undefined || weapon === undefined || weapon.id !== weaponId) {
+      if (weaponId !== '') this.events.push({ type: 'forgeCancelled', playerId, weaponId });
+      this.resetForge();
+      return;
+    }
+    weapon.upgraded = true;
+    weapon.magazine = weaponMagazineCapacity(weapon);
+    weapon.reserve = CONFIG.weapons[weapon.id].reserve;
+    weapon.readyAtMs = this.elapsedMs;
+    combat.activeWeaponIndex = this.forge.weaponIndex;
+    this.events.push({
+      type: 'forgeCompleted',
+      playerId,
+      weaponId: weapon.id,
+      magazine: weapon.magazine,
+      reserve: weapon.reserve,
+    });
+    this.resetForge();
+  }
+
+  private resetForge(): void {
+    this.forge.phase = 'idle';
+    this.forge.playerId = '';
+    this.forge.weaponId = '';
+    this.forge.weaponIndex = -1;
+    this.forge.remainingMs = 0;
   }
 
   private updatePlayerLifecycle(deltaMs: number, players: readonly SimPlayer[]): void {
@@ -1458,7 +1788,7 @@ export class GameSimulation {
       const weapon = state.weapons[state.reloadingWeaponIndex];
       if (weapon !== undefined) {
         const definition = CONFIG.weapons[weapon.id];
-        const capacity = definition.magazine;
+        const capacity = weaponMagazineCapacity(weapon);
         const transfer = definition.reloadStyle === 'shell'
           ? Math.min(1, capacity - weapon.magazine, weapon.reserve)
           : Math.min(capacity - weapon.magazine, weapon.reserve);

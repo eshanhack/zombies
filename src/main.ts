@@ -81,6 +81,7 @@ const getSnapshot = (): GameSnapshot => {
     queued: simulation?.queued ?? 0,
     elapsedMs: simulation?.elapsedMs ?? 0,
     powerOn: simulation?.powerOn ?? false,
+    forge: simulation?.forge ?? { phase: 'idle', playerId: '', weaponId: '', remainingMs: 0 },
     doorsOpen: ['doorA', 'doorB', 'doorC'].map((doorId) => simulation?.openDoors.includes(doorId) ?? false),
     players,
     enemies: simulation?.enemies.map((enemy) => ({
