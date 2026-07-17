@@ -51,4 +51,22 @@ Status: passed
 
 ## P2 — Barriers and enemies
 
-Status: in progress
+Status: passed
+
+- Timestamp: 2026-07-17T13:20:34+10:00
+- Implementation commit: `0a9281281d10`
+- Browser seed: solo `12345`; authoritative network rooms `BS3UFH` (two players) and `NBECSH` (four players)
+- Client count: 4
+- Automated checks:
+  - `npm run check`: passed with zero TypeScript diagnostics; 6 files / 26 tests passed; production PWA client and server both built successfully.
+  - Deterministic solo round 1 spawned exactly six walkers. The shared simulator measured one board per 1,500 ms, a 1,200 ms interruptible vault, one repair per 900 ms with exactly +10 points, and a 150-damage round-one melee kill with exactly +130 points.
+  - Non-lethal explosive damage produced a 0.6 m/s crawler while retaining remaining HP; equal seeds reproduced enemy, speed-tier, and barrier state exactly.
+  - `npm run gate:p2:network`: real SDK clients observed the authoritative historical opening populations—7 at two players and 10 at four players—with nine synchronized barriers, matching seeds, matching live counts, and walker-only speed assignment.
+  - Final production client payload: 721.27 kB JS / 193.63 kB gzip before later phase splitting.
+- Browser acceptance:
+  - The production artifact loaded seed `12345`; F1 first observed `spawn:1`, one alive, five queued, 54 / 54 boards, 100 HP, and 500 points.
+  - After the timed spawn/tear interval, F1 observed five live enemies (`tear:4 · spawn:1`) and 43 / 54 boards; the visible board instances disappeared from the authored wall openings as the synchronized counts changed.
+  - The completed opening population reached exactly six. Kill-all immediately changed the live count to zero and marked the rendered enemy dead; skip-round exhausted the queue and entered the 9-second intermission.
+  - Production F1 stabilized at 60 FPS and 38 draw calls with six procedural enemies, fog, open window geometry, barriers, HUD, and the Melder viewmodel visible. Offline cache reported `ready`.
+  - Production browser logs contained zero errors and zero warnings throughout spawn, tear, kill, and intermission transitions.
+- Architecture evidence: solo and Colyseus use the same fixed-step `GameSimulation`; gameplay RNG is isolated by stream and never calls `Math.random()`; client enemies render through six dynamic `InstancedMesh` batches capped at 24.
