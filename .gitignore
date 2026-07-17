@@ -1,0 +1,12 @@
+node_modules/
+dist/
+dist-server/
+.vite/
+.vercel/
+.colyseus-cloud.json
+coverage/
+*.log
+.env
+.env.*
+!.env.example
+tmp/

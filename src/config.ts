@@ -1,0 +1,326 @@
+export const CONFIG = {
+  player: {
+    maxHp: 100,
+    regenDelayMs: 3500,
+    regenDurationMs: 1000,
+    walkSpeed: 4.0,
+    sprintMultiplier: 1.4,
+    sprintMaxMs: 4000,
+    adsMoveMultiplier: 0.4,
+    backpedalMultiplier: 0.7,
+    fovDeg: 65,
+    postHitInvulnMs: 400,
+  },
+
+  melee: {
+    damage: 150,
+    rangeM: 1.6,
+    lungeRangeM: 2.2,
+    cooldownMs: 800,
+  },
+
+  zombie: {
+    baseHp: 150,
+    hpAddPerRoundThrough9: 100,
+    hpMultiplierFrom10: 1.1,
+    maxAlive: 24,
+    hitDamage: 50,
+    attackCooldownMs: 900,
+    attackRangeM: 1.4,
+    boardTearMs: 1500,
+    windowVaultMs: 1200,
+    speeds: { walk: 1.0, jog: 2.2, sprint: 4.2 },
+    speedMixByRound: [
+      { throughRound: 3, mix: [1.0, 0.0, 0.0] },
+      { throughRound: 5, mix: [0.7, 0.3, 0.0] },
+      { throughRound: 8, mix: [0.4, 0.5, 0.1] },
+      { throughRound: 999, mix: [0.1, 0.5, 0.4] },
+    ],
+    crawlerSpeed: 0.6,
+  },
+
+  rounds: {
+    soloCounts: [6, 8, 13, 18, 24, 27, 28, 30, 33],
+    countFrom10: (round: number) => Math.round(0.15 * 24 * round),
+    intermissionMs: 9000,
+    spawnTrickleMs: [2000, 500],
+  },
+
+  points: {
+    starting: 500,
+    bulletHit: 10,
+    killBonusBody: 50,
+    killBonusHead: 90,
+    killMelee: 130,
+    killExplosive: 50,
+    boardRepair: 10,
+    nukeAward: 400,
+    carpenterAward: 200,
+  },
+
+  economy: {
+    doorCosts: [750, 1000, 1250],
+    grenadesX4: 250,
+    mysteryCrate: 950,
+    forgeUpgrade: 5000,
+    upgradedWallAmmo: 4500,
+    wallAmmoFactor: 0.5,
+  },
+
+  perks: {
+    eisenbrau: { cost: 2500, effect: 'effective HP -> 250 (5 hits)' },
+    schnellwasser: { cost: 3000, effect: 'reload time ×0.5' },
+    doppelschuss: { cost: 2000, effect: 'fire rate +33%' },
+    zweiterAtem: {
+      cost: 1500,
+      costSolo: 500,
+      effect: 'solo: auto self-revive, 3 stock per run',
+    },
+  },
+
+  powerups: {
+    dropChancePerKill: 0.02,
+    maxDropsPerRound: 4,
+    despawnMs: 30000,
+    blinkAtMs: [20000, 25000],
+    instaKillMs: 30000,
+    doublePointsMs: 30000,
+  },
+
+  mysteryCrate: {
+    spinMs: 5000,
+    grabWindowMs: 10000,
+    dollChance: (uses: number) => Math.min(0.5, 0.15 + 0.05 * uses),
+    wonderWeaponWeightPct: 5,
+  },
+
+  simulation: {
+    hz: 60,
+    maxFrameDeltaMs: 100,
+    maxSubSteps: 6,
+    seedFallback: 1945,
+  },
+
+  controller: {
+    capsuleRadiusM: 0.35,
+    capsuleHeightM: 1.75,
+    eyeHeightM: 1.62,
+    gravityMps2: 18,
+    floorSnapM: 0.32,
+    collisionIterations: 4,
+    mouseSensitivity: 0.0021,
+    pitchLimitRad: 1.52,
+    staminaRefillMs: 3000,
+    interactionRangeM: 2.4,
+    interactionHoldMs: 550,
+    weaponSwitchMs: 600,
+    adsLerpMs: 250,
+    recoilRecoveryMs: 150,
+    bobFrequency: 9,
+    bobAmountM: 0.018,
+    swayAmount: 0.0012,
+  },
+
+  barriers: {
+    boardSlots: 6,
+    repairMs: 900,
+    boardWidthM: 1.7,
+    boardHeightM: 0.16,
+    boardDepthM: 0.08,
+  },
+
+  navigation: {
+    repathMs: 500,
+    zombieRadiusM: 0.33,
+    separationRadiusM: 0.85,
+    separationStrength: 2.2,
+    windowDistanceWeightOffsetM: 2,
+    stuckRespawnMs: 30000,
+  },
+
+  combat: {
+    hitscanRangeM: 100,
+    shotgunFalloffStartM: 8,
+    shotgunFalloffEndM: 20,
+    grenadeFuseMs: 4000,
+    grenadeThrowSpeedMps: 16,
+    grenadeDamage: 300,
+    grenadeKillRadiusM: 2.5,
+    grenadeRadiusM: 7,
+    crawlerBleedoutMs: 300000,
+    maxGrenades: 4,
+    maxWeapons: 2,
+  },
+
+  weapons: {
+    melder: {
+      name: 'Melder', source: 'starting', cost: 0, damage: 30, pellets: 1, headMultiplier: 3,
+      rpm: 180, automatic: false, magazine: 8, reserve: 32, reloadMs: 1600,
+      spreadHip: 0.018, spreadAds: 0.003, recoilVertical: 0.028, recoilHorizontal: 0.007,
+      room: 'start', color: 0x45484a,
+    },
+    jaeger: {
+      name: 'Jäger K-8', source: 'wall', cost: 200, damage: 95, pellets: 1, headMultiplier: 4,
+      rpm: 45, automatic: false, magazine: 5, reserve: 50, reloadMs: 2800,
+      spreadHip: 0.022, spreadAds: 0.001, recoilVertical: 0.075, recoilHorizontal: 0.008,
+      room: 'start', color: 0x5b4631,
+    },
+    kurier: {
+      name: 'Kurier', source: 'wall', cost: 600, damage: 70, pellets: 1, headMultiplier: 3,
+      rpm: 300, automatic: false, magazine: 15, reserve: 120, reloadMs: 2200,
+      spreadHip: 0.019, spreadAds: 0.002, recoilVertical: 0.035, recoilHorizontal: 0.009,
+      room: 'armory', color: 0x5c5a4c,
+    },
+    sturmvogel: {
+      name: 'Sturmvogel', source: 'wall', cost: 1200, damage: 40, pellets: 1, headMultiplier: 2.5,
+      rpm: 600, automatic: true, magazine: 32, reserve: 192, reloadMs: 2400,
+      spreadHip: 0.03, spreadAds: 0.007, recoilVertical: 0.022, recoilHorizontal: 0.012,
+      room: 'armory', color: 0x383d3c,
+    },
+    doppelhieb: {
+      name: 'Doppelhieb', source: 'wall', cost: 1200, damage: 25, pellets: 12, headMultiplier: 1.5,
+      rpm: 120, automatic: false, magazine: 2, reserve: 38, reloadMs: 2500,
+      spreadHip: 0.085, spreadAds: 0.06, recoilVertical: 0.11, recoilHorizontal: 0.018,
+      room: 'generator', color: 0x5a4632,
+    },
+    lasttraeger: {
+      name: 'Lastträger', source: 'wall', cost: 1800, damage: 50, pellets: 1, headMultiplier: 2.5,
+      rpm: 500, automatic: true, magazine: 30, reserve: 300, reloadMs: 3800,
+      spreadHip: 0.04, spreadAds: 0.009, recoilVertical: 0.03, recoilHorizontal: 0.014,
+      room: 'catwalk', color: 0x44483e,
+    },
+    richter: {
+      name: '.44 Richter', source: 'crate', cost: 0, damage: 110, pellets: 1, headMultiplier: 3.5,
+      rpm: 150, automatic: false, magazine: 6, reserve: 48, reloadMs: 2600,
+      spreadHip: 0.022, spreadAds: 0.002, recoilVertical: 0.095, recoilHorizontal: 0.012,
+      room: 'crate', color: 0x69696a,
+    },
+    grabenfeger: {
+      name: 'Grabenfeger', source: 'crate', cost: 0, damage: 28, pellets: 10, headMultiplier: 1.5,
+      rpm: 65, automatic: false, magazine: 6, reserve: 54, reloadMs: 720,
+      spreadHip: 0.078, spreadAds: 0.052, recoilVertical: 0.105, recoilHorizontal: 0.018,
+      room: 'crate', color: 0x554836,
+    },
+    fernblick: {
+      name: 'Fernblick', source: 'crate', cost: 0, damage: 160, pellets: 1, headMultiplier: 5,
+      rpm: 40, automatic: false, magazine: 5, reserve: 45, reloadMs: 3000,
+      spreadHip: 0.04, spreadAds: 0, recoilVertical: 0.11, recoilHorizontal: 0.006,
+      room: 'crate', color: 0x4f4d42,
+    },
+    kettenhund: {
+      name: 'Kettenhund', source: 'crate', cost: 0, damage: 55, pellets: 1, headMultiplier: 2.5,
+      rpm: 550, automatic: true, magazine: 125, reserve: 375, reloadMs: 6500,
+      spreadHip: 0.045, spreadAds: 0.01, recoilVertical: 0.027, recoilHorizontal: 0.015,
+      room: 'crate', color: 0x3c433e,
+    },
+    blitzwerfer: {
+      name: 'Blitzwerfer', source: 'wonder', cost: 0, damage: 999999, pellets: 1, headMultiplier: 1,
+      rpm: 60, automatic: false, magazine: 3, reserve: 15, reloadMs: 3000,
+      spreadHip: 0.018, spreadAds: 0.006, recoilVertical: 0.06, recoilHorizontal: 0.01,
+      room: 'crate', color: 0x64bfff,
+    },
+    sonnenpistole: {
+      name: 'Sonnenpistole', source: 'wonder', cost: 0, damage: 1000, pellets: 1, headMultiplier: 2,
+      rpm: 180, automatic: false, magazine: 20, reserve: 160, reloadMs: 3000,
+      spreadHip: 0.02, spreadAds: 0.004, recoilVertical: 0.04, recoilHorizontal: 0.01,
+      room: 'crate', color: 0xff7547,
+    },
+  },
+
+  wonder: {
+    blitzChainTargets: 10,
+    blitzChainRangeM: 5,
+    sunSplashFullRadiusM: 1.5,
+    sunSplashRadiusM: 6,
+    sunSelfDamageMultiplier: 0.1,
+  },
+
+  forge: {
+    animationMs: 3000,
+    smallMagazineThreshold: 6,
+    smallMagazineMultiplier: 2,
+    largeMagazineMultiplier: 1.5,
+    damageMultiplier: 2,
+    spreadMultiplier: 0.65,
+  },
+
+  coop: {
+    localServerUrl: 'ws://127.0.0.1:2567',
+    maxPlayers: 4,
+    inputHz: 30,
+    patchRateMs: 50,
+    interpolationMs: 100,
+    rewindMs: 200,
+    reconnectRoomRetentionMs: 600000,
+    bleedoutMs: 30000,
+    reviveMs: 4500,
+    quickReviveMultiplier: 0.5,
+    reviveAward: 50,
+    roomCodeLength: 6,
+    maxDisplayNameLength: 16,
+    maxMessagesPerSecond: 90,
+    earlyRoundFactors: [0.25, 0.3, 0.5, 0.7, 0.9],
+  },
+
+  wolves: {
+    firstRoundMin: 5,
+    firstRoundMax: 7,
+    intervalMin: 5,
+    intervalMax: 7,
+    firstTwoCountPerPlayer: 6,
+    laterCountPerPlayer: 8,
+    healthByAppearance: [400, 900, 1300, 1600],
+    speedMps: 5.5,
+    damage: 40,
+    attackCooldownMs: 700,
+    maxActivePerPlayer: 2,
+  },
+
+  map: {
+    wallThicknessM: 0.35,
+    startHall: { minX: -7, maxX: 7, minZ: -5, maxZ: 5, floorY: 0, ceilingY: 3.5 },
+    armory: { minX: -15, maxX: -5, minZ: 9, maxZ: 17, floorY: 0, ceilingY: 3.5 },
+    generator: { minX: 1, maxX: 13, minZ: 8, maxZ: 17, floorY: 0, ceilingY: 6.8 },
+    catwalkY: 3.2,
+    corridorWidthM: 2,
+    doorWidthM: 1.8,
+    doorHeightM: 2.7,
+  },
+
+  rendering: {
+    clearColor: 0x050707,
+    fogColor: 0x10191c,
+    fogNearM: 7,
+    fogFarM: 42,
+    maxPixelRatio: 1.5,
+    shadowMapSize: 1024,
+    muzzleLightIntensity: 9,
+    muzzleLightDistanceM: 7,
+    muzzleLightMs: 55,
+    drawCallBudget: 150,
+    targetFps: 60,
+    stressSampleMs: 30000,
+  },
+
+  audio: {
+    masterGain: 0.72,
+    effectsGain: 0.8,
+    ambienceGain: 0.42,
+    musicGain: 0.5,
+    maxDistanceM: 34,
+    referenceDistanceM: 2,
+    reverbSeconds: 1.15,
+    reverbDecay: 2.6,
+  },
+
+  storage: {
+    settingsKey: 'stahlbunker:v1:settings',
+    recordsKey: 'stahlbunker:v1:records',
+    resumeKey: 'stahlbunker:v1:resume',
+  },
+} as const;
+
+export type WeaponId = keyof typeof CONFIG.weapons;
+export type PerkId = keyof typeof CONFIG.perks;
+export type PowerupId = 'instaKill' | 'doublePoints' | 'nuke' | 'maxAmmo' | 'carpenter';
+export type RoomId = 'start' | 'armory' | 'generator' | 'catwalk';

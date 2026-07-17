@@ -1,0 +1,5 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" role="img" aria-label="Stahlbunker emblem">
+  <rect width="64" height="64" rx="8" fill="#080a09"/>
+  <path d="M11 46V27l21-12 21 12v19H43V31H21v15Z" fill="#b31f22"/>
+  <path d="M26 35h12v17H26z" fill="#d7c6a6"/>
+</svg>
