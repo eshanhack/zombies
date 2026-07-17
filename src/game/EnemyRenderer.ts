@@ -39,6 +39,8 @@ interface RigVisual {
   lastHp: number;
   lastStateTimeMs: number;
   staggerRemainingMs: number;
+  basePosition: THREE.Vector3;
+  baseYaw: number;
 }
 
 interface SkeletonBuild {
@@ -60,6 +62,8 @@ const WOLF_BONE_NAMES = [
   'frontLeftUpper', 'frontLeftLower', 'frontRightUpper', 'frontRightLower',
   'rearLeftUpper', 'rearLeftLower', 'rearRightUpper', 'rearRightLower', 'tail',
 ] as const;
+
+const _targetPosition = new THREE.Vector3();
 
 export class EnemyRenderer {
   readonly group = new THREE.Group();
@@ -114,7 +118,7 @@ export class EnemyRenderer {
     };
   }
 
-  update(enemies: readonly EnemyVisualState[]): void {
+  update(enemies: readonly EnemyVisualState[], interpolationAlpha = 1): void {
     const visible = enemies.slice(0, CONFIG.zombie.maxAlive);
     const activeIds = new Set(visible.map((enemy) => enemy.id));
     for (const [id, rig] of this.assignments) {
@@ -141,10 +145,12 @@ export class EnemyRenderer {
         rig.lastHp = enemy.hp ?? enemy.maxHp ?? 1;
         rig.lastStateTimeMs = enemy.stateTimeMs;
         rig.staggerRemainingMs = 0;
+        rig.basePosition.set(enemy.x, enemy.y, enemy.z);
+        rig.baseYaw = enemy.yaw;
         rig.group.visible = true;
         this.assignments.set(enemy.id, rig);
       }
-      this.updateRig(rig, enemy);
+      this.updateRig(rig, enemy, interpolationAlpha);
     }
     this.updateEyes(visible);
     this.diagnostics.visible = this.assignments.size;
@@ -193,6 +199,8 @@ export class EnemyRenderer {
       lastHp: 1,
       lastStateTimeMs: 0,
       staggerRemainingMs: 0,
+      basePosition: new THREE.Vector3(),
+      baseYaw: 0,
     };
   }
 
@@ -221,10 +229,12 @@ export class EnemyRenderer {
       lastHp: 1,
       lastStateTimeMs: 0,
       staggerRemainingMs: 0,
+      basePosition: new THREE.Vector3(),
+      baseYaw: 0,
     };
   }
 
-  private updateRig(rig: RigVisual, enemy: EnemyVisualState): void {
+  private updateRig(rig: RigVisual, enemy: EnemyVisualState, interpolationAlpha: number): void {
     resetSkeleton(rig);
     const deltaMs = enemy.stateTimeMs >= rig.lastStateTimeMs
       ? Math.min(CONFIG.simulation.maxFrameDeltaMs, enemy.stateTimeMs - rig.lastStateTimeMs)
@@ -234,8 +244,11 @@ export class EnemyRenderer {
     rig.staggerRemainingMs = Math.max(0, rig.staggerRemainingMs - deltaMs);
     rig.lastHp = hp;
     rig.lastStateTimeMs = enemy.stateTimeMs;
-    rig.group.position.set(enemy.x, enemy.y, enemy.z);
-    rig.group.rotation.set(0, enemy.yaw, 0);
+    const alpha = THREE.MathUtils.clamp(interpolationAlpha, 0, 1);
+    rig.basePosition.lerp(_targetPosition.set(enemy.x, enemy.y, enemy.z), alpha);
+    rig.baseYaw = lerpAngle(rig.baseYaw, enemy.yaw, alpha);
+    rig.group.position.copy(rig.basePosition);
+    rig.group.rotation.set(0, rig.baseYaw, 0);
     rig.group.scale.set(1, 1, 1);
     rig.dissolve.value = 0;
     if (rig.kind === 'wolf') this.animateWolf(rig, enemy);
@@ -248,17 +261,22 @@ export class EnemyRenderer {
     let zombieIndex = 0;
     let wolfIndex = 0;
     for (const enemy of enemies) {
+      const rig = this.assignments.get(enemy.id);
+      const x = rig?.basePosition.x ?? enemy.x;
+      const y = rig?.basePosition.y ?? enemy.y;
+      const z = rig?.basePosition.z ?? enemy.z;
+      const yaw = rig?.baseYaw ?? enemy.yaw;
       const spawnOffset = enemy.state === 'spawn' ? -(1 - enemy.spawnProgress) * CONFIG.rendering.zombieVisual.spawnDepthM : 0;
       const deathProgress = enemy.state === 'dead' ? Math.min(1, enemy.stateTimeMs / CONFIG.zombie.deathDissolveMs) : 0;
       const scale = Math.max(0.001, 1 - deathProgress);
       if (enemy.kind === 'wolf') {
         const faceOffset = 0.96;
         dummy.position.set(
-          enemy.x - Math.sin(enemy.yaw) * faceOffset,
-          enemy.y + 0.725 + spawnOffset - deathProgress * 0.28,
-          enemy.z - Math.cos(enemy.yaw) * faceOffset,
+          x - Math.sin(yaw) * faceOffset,
+          y + 0.725 + spawnOffset - deathProgress * 0.28,
+          z - Math.cos(yaw) * faceOffset,
         );
-        dummy.rotation.set(0, enemy.yaw, (enemy.id % 2 === 0 ? 1 : -1) * deathProgress * CONFIG.rendering.wolfVisual.deathRollRad);
+        dummy.rotation.set(0, yaw, (enemy.id % 2 === 0 ? 1 : -1) * deathProgress * CONFIG.rendering.wolfVisual.deathRollRad);
         dummy.scale.setScalar(scale);
         dummy.updateMatrix();
         this.wolfEyes.setMatrixAt(wolfIndex, dummy.matrix);
@@ -267,11 +285,11 @@ export class EnemyRenderer {
         const crawlerScale = enemy.kind === 'crawler' ? CONFIG.rendering.zombieVisual.crawlerHeightScale : 1;
         const faceOffset = 0.205;
         dummy.position.set(
-          enemy.x - Math.sin(enemy.yaw) * faceOffset,
-          enemy.y + 1.765 * crawlerScale + spawnOffset - deathProgress * 0.34,
-          enemy.z - Math.cos(enemy.yaw) * faceOffset,
+          x - Math.sin(yaw) * faceOffset,
+          y + 1.765 * crawlerScale + spawnOffset - deathProgress * 0.34,
+          z - Math.cos(yaw) * faceOffset,
         );
-        dummy.rotation.set(0, enemy.yaw, (enemy.id % 2 === 0 ? 1 : -1) * deathProgress * CONFIG.rendering.zombieVisual.deathTiltRad);
+        dummy.rotation.set(0, yaw, (enemy.id % 2 === 0 ? 1 : -1) * deathProgress * CONFIG.rendering.zombieVisual.deathTiltRad);
         dummy.scale.setScalar(scale);
         dummy.updateMatrix();
         this.zombieEyes.setMatrixAt(zombieIndex, dummy.matrix);
@@ -795,6 +813,11 @@ function setRotationZ(bone: THREE.Bone | undefined, value: number): void {
 
 function triangleCount(geometry: THREE.BufferGeometry): number {
   return geometry.index === null ? geometry.getAttribute('position').count / 3 : geometry.index.count / 3;
+}
+
+function lerpAngle(from: number, to: number, alpha: number): number {
+  const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
+  return from + delta * alpha;
 }
 
 function pseudo(value: number): number {

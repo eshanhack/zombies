@@ -95,4 +95,6 @@ export interface GameSnapshot {
   powerups: ActivePowerup[];
   drawCalls: number;
   fps: number;
+  medianFrameMs: number;
+  p95FrameMs: number;
 }

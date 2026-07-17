@@ -68,6 +68,7 @@ interface WireState {
   doublePointsRemainingMs: number;
   nukeRemainingMs: number;
   simulationTimeMs: number;
+  serverTimeMs: number;
   openDoors: { forEach(callback: (doorId: string) => void): void };
   crateLocationId: string;
   cratePhase: string;
@@ -152,6 +153,7 @@ export interface NetworkEnemyView {
 
 export interface NetworkGameView {
   localPlayerId: string;
+  serverTimeMs: number;
   round: number;
   elapsedMs: number;
   spawned: number;
@@ -255,7 +257,7 @@ export interface NetworkWeaponView {
 export type ClientAction =
   | { type: 'melee' }
   | { type: 'interact'; held: boolean }
-  | { type: 'fire'; ads: boolean }
+  | { type: 'fire'; ads: boolean; simulationTimeMs: number; yaw: number; pitch: number }
   | { type: 'reload' }
   | { type: 'switch'; index: number }
   | { type: 'grenade'; cookedMs: number };
@@ -298,6 +300,7 @@ export class CoopClient {
   private movementListener: MovementListener = () => undefined;
   private simulationListener: SimulationListener = () => undefined;
   private feedbackListener: FeedbackListener = () => undefined;
+  private actionSequence = 0;
 
   constructor(endpoint = import.meta.env.VITE_GAME_SERVER ?? CONFIG.coop.localServerUrl) {
     this.client = new Client(endpoint);
@@ -351,7 +354,8 @@ export class CoopClient {
   }
 
   sendAction(action: ClientAction): void {
-    this.room?.send('action', action);
+    this.actionSequence += 1;
+    this.room?.send('action', { ...action, sequence: this.actionSequence });
   }
 
   async leave(): Promise<void> {
@@ -382,6 +386,7 @@ export class CoopClient {
       );
     }
     this.room = room;
+    this.actionSequence = 0;
     room.onMessage('runStarted', () => undefined);
     room.onMessage('combatFeedback', (message: Omit<Extract<NetworkFeedback, { kind: 'combat' }>, 'kind'>) => {
       this.feedbackListener({ kind: 'combat', ...message });
@@ -593,6 +598,7 @@ export class CoopClient {
     state.openDoors?.forEach((doorId) => openDoors.push(doorId));
     this.simulationListener({
       localPlayerId: room.sessionId,
+      serverTimeMs: state.serverTimeMs,
       round: state.round,
       elapsedMs: state.simulationTimeMs,
       spawned: state.spawned,

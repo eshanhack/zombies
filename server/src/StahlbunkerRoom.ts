@@ -11,6 +11,7 @@ import {
 } from '../../src/shared/movement.js';
 import {
   GameSimulation,
+  type EnemyPositionSnapshot,
   type SimBarrier,
   type SimEnemy,
   type SimGrenade,
@@ -27,10 +28,19 @@ interface JoinOptions {
 
 interface ActionMessage {
   type: 'melee' | 'repair' | 'interact' | 'fire' | 'reload' | 'switch' | 'grenade';
+  sequence?: number;
   held?: boolean;
   ads?: boolean;
   index?: number;
   cookedMs?: number;
+  simulationTimeMs?: number;
+  yaw?: number;
+  pitch?: number;
+}
+
+interface EnemyHistoryFrame {
+  simulationTimeMs: number;
+  positions: Map<number, EnemyPositionSnapshot>;
 }
 
 interface GateMessage {
@@ -67,7 +77,9 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
   patchRate = CONFIG.coop.patchRateMs;
   maxMessagesPerSecond = CONFIG.coop.maxMessagesPerSecond;
   private readonly inputSequences = new Map<string, number>();
+  private readonly actionSequences = new Map<string, number>();
   private readonly latestInputs = new Map<string, MovementInput>();
+  private readonly enemyHistory: EnemyHistoryFrame[] = [];
   private readonly collisionWorld = createCollisionWorld();
   private simulation: GameSimulation | null = null;
   private simulationAccumulatorMs = 0;
@@ -106,6 +118,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         }
         resolvePlayerSeparation(players);
         simulation.update(fixedDeltaMs, allPlayers);
+        this.recordEnemyHistory(simulation);
         this.publishSimulationEvents(simulation.drainEvents());
         this.simulationAccumulatorMs -= fixedDeltaMs;
         subSteps += 1;
@@ -125,6 +138,8 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       this.state.phase = 'playing';
       this.simulation = new GameSimulation({ seed: this.state.seed, mode: 'coop', rosterSize: this.state.players.size });
       this.simulationAccumulatorMs = 0;
+      this.enemyHistory.length = 0;
+      this.recordEnemyHistory(this.simulation);
       this.syncSimulation(this.simulation);
       this.lock();
       this.broadcast('runStarted', { seed: this.state.seed, roster: this.state.players.size });
@@ -143,6 +158,12 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       const simulation = this.simulation;
       const player = this.state.players.get(client.sessionId);
       if (simulation === null || player === undefined || player.spectating || simulation.gameOver || action === null || typeof action !== 'object') return;
+      if (Number.isFinite(action.sequence)) {
+        const sequence = Math.max(0, Math.floor(action.sequence ?? 0));
+        const prior = this.actionSequences.get(client.sessionId) ?? -1;
+        if (sequence <= prior) return;
+        this.actionSequences.set(client.sessionId, sequence);
+      }
       if (player.downed && action.type !== 'fire' && action.type !== 'reload') return;
       if (action.type === 'melee') {
         const result = simulation.melee(player);
@@ -155,8 +176,21 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         simulation.setInteractionHeld(client.sessionId, action.held === true);
       }
       if (action.type === 'fire') {
-        const result = simulation.fire(player, action.ads === true);
-        client.send('combatFeedback', { source: 'fire', ...result });
+        if (Number.isFinite(action.yaw)) player.yaw = action.yaw ?? player.yaw;
+        if (Number.isFinite(action.pitch)) {
+          player.pitch = Math.max(-CONFIG.controller.pitchLimitRad, Math.min(CONFIG.controller.pitchLimitRad, action.pitch ?? player.pitch));
+        }
+        const requestedTimeMs = Number.isFinite(action.simulationTimeMs) ? action.simulationTimeMs ?? simulation.elapsedMs : simulation.elapsedMs;
+        const rewindTimeMs = Math.max(
+          simulation.elapsedMs - CONFIG.coop.rewindMs,
+          Math.min(simulation.elapsedMs, requestedTimeMs),
+        );
+        const rewindPositions = this.enemyPositionsAt(rewindTimeMs);
+        const result = rewindPositions.size > 0
+          ? simulation.fireRewound(player, action.ads === true, rewindPositions)
+          : simulation.fire(player, action.ads === true);
+        const rewindAppliedMs = Math.round(simulation.elapsedMs - rewindTimeMs);
+        client.send('combatFeedback', { source: 'fire', ...result, rewindAppliedMs });
         if (result.accepted) {
           this.broadcast('gameEvent', {
             type: 'weaponFired',
@@ -228,6 +262,8 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       if (message.type === 'startRound' && Number.isFinite(message.round)) {
         const round = Math.max(1, Math.floor(message.round ?? 1));
         simulation.debugStartRound(round, [...this.state.players.values()]);
+        this.enemyHistory.length = 0;
+        this.recordEnemyHistory(simulation);
       }
       if (message.type === 'killAll') simulation.killAll();
       if (message.type === 'spawnWonderPack') simulation.debugSpawnWonderPack(player, [...this.state.players.values()]);
@@ -292,6 +328,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
   private markDisconnected(sessionId: string): void {
     this.latestInputs.delete(sessionId);
     this.inputSequences.delete(sessionId);
+    this.actionSequences.delete(sessionId);
     this.simulation?.setRepairHeld(sessionId, false);
     this.simulation?.setInteractionHeld(sessionId, false);
     const player = this.state.players.get(sessionId);
@@ -309,7 +346,9 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
   onDispose(): void {
     this.clearEmptyRoomTimer();
     this.inputSequences.clear();
+    this.actionSequences.clear();
     this.latestInputs.clear();
+    this.enemyHistory.length = 0;
     this.simulation = null;
     this.simulationAccumulatorMs = 0;
   }
@@ -390,6 +429,29 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       player.dead = life.dead;
       player.reconnectPending = life.reconnectPending;
     }
+  }
+
+  private recordEnemyHistory(simulation: GameSimulation): void {
+    const positions = new Map<number, EnemyPositionSnapshot>();
+    for (const enemy of simulation.enemies.values()) {
+      if (enemy.state === 'dead') continue;
+      positions.set(enemy.id, { x: enemy.x, y: enemy.y, z: enemy.z });
+    }
+    this.enemyHistory.push({ simulationTimeMs: simulation.elapsedMs, positions });
+    const oldestAllowedMs = simulation.elapsedMs - CONFIG.coop.rewindMs - 1000 / CONFIG.simulation.hz;
+    while (this.enemyHistory.length > 1 && this.enemyHistory[1]!.simulationTimeMs < oldestAllowedMs) this.enemyHistory.shift();
+  }
+
+  private enemyPositionsAt(simulationTimeMs: number): ReadonlyMap<number, EnemyPositionSnapshot> {
+    let closest: EnemyHistoryFrame | undefined;
+    let closestDistance = Number.POSITIVE_INFINITY;
+    for (const frame of this.enemyHistory) {
+      const distance = Math.abs(frame.simulationTimeMs - simulationTimeMs);
+      if (distance >= closestDistance) continue;
+      closest = frame;
+      closestDistance = distance;
+    }
+    return closest?.positions ?? new Map<number, EnemyPositionSnapshot>();
   }
 
   private syncCombatPlayer(player: NetPlayer, source: CombatPlayerState, elapsedMs: number): void {

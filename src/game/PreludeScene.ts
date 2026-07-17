@@ -8,7 +8,7 @@ import type { MovementInput } from '../shared/movement.js';
 import { GameSimulation, type SimCrateState, type SimGrenade, type SimPlayer } from '../shared/GameSimulation.js';
 import { activeWeapon, type CombatPlayerState, type FireResult, type RuntimeWeaponState, weaponMagazineCapacity } from '../shared/combat.js';
 import { BunkerMap } from './BunkerMap.js';
-import { EnemyRenderer, type EnemyVisualState } from './EnemyRenderer.js';
+import { EnemyRenderer, type EnemyRendererDiagnostics, type EnemyVisualState } from './EnemyRenderer.js';
 import { FirstPersonController, type AuthoritativePlayerState, type ControllerReadout } from './FirstPersonController.js';
 import { ProductionPost } from './ProductionPost.js';
 import { RemoteOperative } from './RemoteOperative.js';
@@ -19,6 +19,12 @@ export interface SceneMetrics {
   fps: number;
   drawCalls: number;
   triangles: number;
+  medianFrameMs: number;
+  p95FrameMs: number;
+}
+
+export interface CharacterDiagnostics extends EnemyRendererDiagnostics {
+  remoteVisible: number;
 }
 
 export interface RemotePlayerPose {
@@ -188,7 +194,14 @@ export class PreludeScene {
   private visualGate = false;
   private fieldOfView: number = CONFIG.player.fovDeg;
   private sensitivityMultiplier: number = 1;
-  private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0, triangles: 0 };
+  private metrics: SceneMetrics = {
+    fps: CONFIG.rendering.targetFps,
+    drawCalls: 0,
+    triangles: 0,
+    medianFrameMs: 1000 / CONFIG.rendering.targetFps,
+    p95FrameMs: 1000 / CONFIG.rendering.targetFps,
+  };
+  private readonly frameSamplesMs: number[] = [];
 
   constructor(seed: number) {
     this.cosmeticRng = new SeededRng(seed ^ 0x5f356495);
@@ -310,8 +323,6 @@ export class PreludeScene {
 
   applyNetworkSimulation(view: NetworkGameView): void {
     this.networkSimulation = view;
-    if (this.gameMode !== 'coop') return;
-    this.refreshSimulationVisuals();
   }
 
   applyNetworkFeedback(feedback: NetworkFeedback): void {
@@ -588,7 +599,29 @@ export class PreludeScene {
         0,
         0,
       );
-      return this.simulation.enemies.size === CONFIG.zombie.maxAlive;
+      for (const [id, visual] of this.remotePlayers) {
+        this.remoteRoot.remove(visual.group);
+        visual.rig.dispose();
+        this.remotePlayers.delete(id);
+      }
+      CONFIG.debug.stressRemotePoses.forEach((pose, index) => {
+        const visual = this.createRemoteVisual();
+        visual.group.position.set(pose.x, pose.y, pose.z);
+        visual.group.rotation.y = pose.yaw;
+        visual.targetPosition.copy(visual.group.position);
+        visual.targetYaw = pose.yaw;
+        visual.targetPitch = pose.pitch;
+        visual.targetSpeedMps = pose.speedMps;
+        visual.targetDowned = false;
+        visual.rig.update(0, { speedMps: pose.speedMps, pitch: pose.pitch, downed: false });
+        this.remoteRoot.add(visual.group);
+        this.remotePlayers.set(`stress-remote-${index + 1}`, visual);
+      });
+      this.frameSamplesMs.length = 0;
+      this.elapsedSample = 0;
+      this.sampledFrames = 0;
+      return this.simulation.enemies.size === CONFIG.zombie.maxAlive
+        && this.remotePlayers.size === CONFIG.debug.stressRemotePoses.length;
     }
     if (name === 'tour') {
       this.visualGate = true;
@@ -893,8 +926,13 @@ export class PreludeScene {
     return this.audio.getDiagnostics();
   }
 
-  getCharacterDiagnostics(): ReturnType<EnemyRenderer['getDiagnostics']> | null {
-    return this.enemyRenderer?.getDiagnostics() ?? null;
+  getCharacterDiagnostics(): CharacterDiagnostics | null {
+    const diagnostics = this.enemyRenderer?.getDiagnostics();
+    if (diagnostics === undefined) return null;
+    return {
+      ...diagnostics,
+      remoteVisible: [...this.remotePlayers.values()].filter((visual) => visual.group.visible).length,
+    };
   }
 
   setMasterVolume(value: number): void {
@@ -1376,7 +1414,10 @@ export class PreludeScene {
     if (this.muzzleLight !== null) this.muzzleLight.intensity = this.muzzleRemainingMs > 0 ? CONFIG.rendering.muzzleLightIntensity : 0;
     this.updateViewmodel(controller.getReadout(), delta);
     this.updateWonderEffects(delta * 1000);
-    this.refreshSimulationVisuals();
+    const enemyInterpolationAlpha = this.gameMode === 'coop'
+      ? Math.min(1, delta / (CONFIG.coop.interpolationMs / 1000))
+      : 1;
+    this.refreshSimulationVisuals(enemyInterpolationAlpha);
     const controllerReadout = controller.getReadout();
     const simulationReadout = this.getSimulationReadout();
     if (simulationReadout !== null) {
@@ -1526,11 +1567,11 @@ export class PreludeScene {
     });
   }
 
-  private refreshSimulationVisuals(): void {
+  private refreshSimulationVisuals(enemyInterpolationAlpha = 1): void {
     const readout = this.getSimulationReadout();
     if (readout === null) return;
     this.controller?.setMovementEnabled(!readout.downed && !readout.spectating && !readout.gameOver);
-    this.enemyRenderer?.update(readout.enemies);
+    this.enemyRenderer?.update(readout.enemies, enemyInterpolationAlpha);
     this.bunkerMap?.updateBarriers(readout.barriers);
     for (const door of DOORS) this.bunkerMap?.setDoorOpen(door.id, readout.openDoors.includes(door.id));
     this.bunkerMap?.updateCrate(readout.crate, readout.elapsedMs);
@@ -1568,7 +1609,13 @@ export class PreludeScene {
       if (nowMs < this.nextCosmeticFireAtMs) return;
       const fireRateMultiplier = simulationReadout.perks.includes('doppelschuss') ? CONFIG.perkRuntime.doppelschussFireRateMultiplier : 1;
       this.nextCosmeticFireAtMs = nowMs + 60000 / (CONFIG.weapons[weapon.id].rpm * fireRateMultiplier);
-      this.sendAction?.({ type: 'fire', ads: controllerReadout.ads });
+      this.sendAction?.({
+        type: 'fire',
+        ads: controllerReadout.ads,
+        simulationTimeMs: simulationReadout.elapsedMs,
+        yaw: controllerReadout.yaw,
+        pitch: controllerReadout.pitch,
+      });
       this.playLocalShot(weapon.id);
       return;
     }
@@ -1981,11 +2028,16 @@ export class PreludeScene {
     this.post.render(elapsed, readout === null ? 1 : readout.hp / Math.max(1, readout.maxHp));
     this.elapsedSample += delta;
     this.sampledFrames += 1;
+    this.frameSamplesMs.push(delta * 1000);
+    if (this.frameSamplesMs.length > CONFIG.rendering.frameSampleWindow) this.frameSamplesMs.shift();
     if (this.elapsedSample >= 0.5) {
+      const sortedFrameSamples = [...this.frameSamplesMs].sort((left, right) => left - right);
       this.metrics = {
         fps: Math.round(this.sampledFrames / this.elapsedSample),
         drawCalls: this.renderer.info.render.calls,
         triangles: this.renderer.info.render.triangles,
+        medianFrameMs: percentile(sortedFrameSamples, 0.5),
+        p95FrameMs: percentile(sortedFrameSamples, 0.95),
       };
       this.elapsedSample = 0;
       this.sampledFrames = 0;
@@ -2014,6 +2066,12 @@ export class PreludeScene {
 function lerpAngle(from: number, to: number, alpha: number): number {
   const delta = Math.atan2(Math.sin(to - from), Math.cos(to - from));
   return from + delta * alpha;
+}
+
+function percentile(sortedValues: readonly number[], quantile: number): number {
+  if (sortedValues.length === 0) return 0;
+  const index = Math.min(sortedValues.length - 1, Math.max(0, Math.ceil(sortedValues.length * quantile) - 1));
+  return sortedValues[index] ?? 0;
 }
 
 function toEnemyVisual(enemy: {

@@ -97,7 +97,7 @@ export class AppShell {
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P8 PRODUCTION ART</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>RELEASE TELEMETRY</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -141,7 +141,7 @@ export class AppShell {
         <button data-debug-action="forgeview">Stage Forge visual gate</button>
         <button data-debug-action="audio">Run left/right breach cue</button>
         <button data-debug-action="gallery">Stage character gallery</button>
-        <button data-debug-action="stress">Stage 24-enemy stress</button>
+        <button data-debug-action="stress">Stage 24-enemy + 3-player stress</button>
         <button data-debug-action="tour">Cycle room visual tour</button>
         <button data-debug-action="gameover">Stage game-over report</button>
       </div>
@@ -283,7 +283,7 @@ export class AppShell {
 
     window.setInterval(() => {
       const metrics = scene.getMetrics();
-      this.metricValue.textContent = `${metrics.fps} FPS · ${metrics.drawCalls} calls · ${(metrics.triangles / 1000).toFixed(0)}k tris`;
+      this.metricValue.textContent = `${metrics.fps} FPS · ${metrics.drawCalls} calls · ${(metrics.triangles / 1000).toFixed(0)}k tris · ${metrics.medianFrameMs.toFixed(1)} ms med / ${metrics.p95FrameMs.toFixed(1)} p95`;
       const snapshot = this.snapshotProvider();
       if (snapshot !== null) {
         this.renderSnapshot(snapshot);
@@ -305,7 +305,7 @@ export class AppShell {
         const character = scene.getCharacterDiagnostics();
         const characterValue = this.overlay.querySelector<HTMLElement>('[data-debug="characters"]');
         if (characterValue !== null && character !== null) {
-          characterValue.textContent = `${character.visible} visible · Z ${character.zombieBones}b/${character.zombieTriangles}t · W ${character.wolfBones}b/${character.wolfTriangles}t · ${character.silhouettes} silhouettes`;
+          characterValue.textContent = `${character.visible} enemies · R ${character.remoteVisible} · Z ${character.zombieBones}b/${character.zombieTriangles}t · W ${character.wolfBones}b/${character.wolfTriangles}t · ${character.silhouettes} silhouettes`;
         }
         const audioDiagnostics = scene.getAudioDiagnostics();
         const audioValue = this.overlay.querySelector<HTMLElement>('[data-debug="audio"]');

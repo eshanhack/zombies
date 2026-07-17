@@ -153,6 +153,33 @@ export const CONFIG = {
     seedFallback: 1945,
   },
 
+  pacingVerification: {
+    seeds: [12345, 424242, 9001],
+    consecutiveRuns: 3,
+    campaignThroughRound: 25,
+    benchmarkRounds: [1, 4, 7, 10, 15, 20],
+    envelopeMs: {
+      1: [40000, 70000],
+      4: [60000, 100000],
+      7: [120000, 180000],
+      10: [150000, 210000],
+      15: [240000, 300000],
+      20: [360000, 480000],
+    },
+    initialEngagementMs: 3000,
+    killCadenceKeyframes: [
+      { round: 1, cadenceMs: 8000 },
+      { round: 4, cadenceMs: 4500 },
+      { round: 7, cadenceMs: 5000 },
+      { round: 10, cadenceMs: 4800 },
+      { round: 15, cadenceMs: 5000 },
+      { round: 20, cadenceMs: 5500 },
+      { round: 25, cadenceMs: 6000 },
+    ],
+    wolfKillCadenceMs: 3500,
+    maximumTicksPerRound: 40000,
+  },
+
   debug: {
     apiVersion: 1,
     gatePointGrant: 10000,
@@ -161,6 +188,11 @@ export const CONFIG = {
     wonderPackSpacingM: 1.05,
     wonderPackColumns: 5,
     wonderGateRound: 25,
+    stressRemotePoses: [
+      { x: -2.25, y: 0, z: -3.45, yaw: 0, pitch: -0.04, speedMps: 4.0 },
+      { x: 0, y: 0, z: -3.8, yaw: 0, pitch: -0.025, speedMps: 4.0 },
+      { x: 2.25, y: 0, z: -3.45, yaw: 0, pitch: -0.04, speedMps: 4.0 },
+    ],
   },
 
   controller: {
@@ -338,7 +370,7 @@ export const CONFIG = {
   },
 
   coop: {
-    protocolVersion: 1,
+    protocolVersion: 2,
     handshakeTimeoutMs: 5000,
     localServerUrl: 'ws://127.0.0.1:2567',
     maxPlayers: 4,
@@ -404,6 +436,7 @@ export const CONFIG = {
     drawCallBudget: 150,
     targetFps: 60,
     stressSampleMs: 30000,
+    frameSampleWindow: 1800,
     cameraNearM: 0.05,
     cameraFarM: 100,
     materials: {

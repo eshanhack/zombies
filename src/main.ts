@@ -117,6 +117,8 @@ const getSnapshot = (): GameSnapshot => {
     })) ?? [],
     drawCalls: metrics.drawCalls,
     fps: metrics.fps,
+    medianFrameMs: metrics.medianFrameMs,
+    p95FrameMs: metrics.p95FrameMs,
   };
 };
 

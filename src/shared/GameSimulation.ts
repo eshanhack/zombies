@@ -83,6 +83,12 @@ export interface SimEnemy {
   windowAttackInMs: number;
 }
 
+export interface EnemyPositionSnapshot {
+  x: number;
+  y: number;
+  z: number;
+}
+
 export interface SimGrenade {
   id: number;
   ownerId: string;
@@ -678,6 +684,33 @@ export class GameSimulation {
       affectedEnemyIds: [...affectedEnemyIds],
       impact,
     };
+  }
+
+  fireRewound(
+    player: SimPlayer,
+    ads: boolean,
+    positions: ReadonlyMap<number, EnemyPositionSnapshot>,
+  ): FireResult {
+    const originals = new Map<number, EnemyPositionSnapshot>();
+    for (const [enemyId, position] of positions) {
+      const enemy = this.enemies.get(enemyId);
+      if (enemy === undefined || enemy.state === 'dead') continue;
+      originals.set(enemyId, { x: enemy.x, y: enemy.y, z: enemy.z });
+      enemy.x = position.x;
+      enemy.y = position.y;
+      enemy.z = position.z;
+    }
+    try {
+      return this.fire(player, ads);
+    } finally {
+      for (const [enemyId, position] of originals) {
+        const enemy = this.enemies.get(enemyId);
+        if (enemy === undefined) continue;
+        enemy.x = position.x;
+        enemy.y = position.y;
+        enemy.z = position.z;
+      }
+    }
   }
 
   private fireBlitz(
