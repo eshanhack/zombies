@@ -91,3 +91,29 @@ Status: passed
   - Procedural Melder and Jäger firing/reload layers initialized from a user gesture without browser errors. Recoil is applied to the actual input aim and recovers over the canonical 150 ms, while muzzle light and viewmodel kick remain immediate client cosmetics.
   - Production F1 held 60 FPS at 38 calls with the Melder and 40 calls with the more detailed Jäger viewmodel; production browser logs contained zero errors and zero warnings.
 - Presentation evidence: round 1–5 uses original distressed canvas tally strokes; the numeral renderer, flare/burn/settle transition, point ledger, directional damage layer foundation, low-health treatment, hitmarker, expanding crosshair, ammo/reserve, grenade count, and weapon naming are all live rather than static mockups.
+
+## P4 — Full conventional arsenal and economy
+
+Status: passed
+
+- Timestamp: 2026-07-17T14:28:06+10:00
+- Implementation commit: `1890bdb2a0f1`
+- Browser seed: solo production `12345`; authoritative two-client room `GCUTJX`
+- Client count: 2 authoritative clients plus production-browser solo
+- Automated checks:
+  - `npm run check`: passed with zero TypeScript diagnostics; 8 files / 73 tests passed; production PWA client and authoritative server built successfully.
+  - Every conventional firearm—Melder, Jäger K-8, Kurier, Sturmvogel, Doppelhieb, Lastträger, .44 Richter, Grabenfeger, Fernblick, and Kettenhund—passed its table damage, head multiplier, RPM lock, magazine/reserve, and exact reload-duration checks. Grabenfeger loads one shell per 720 ms and can fire-cancel once a shell is loaded; switching locks fire for exactly 600 ms without erasing either weapon's own cadence.
+  - Shotgun tests verified all configured pellets at close range and the hard damage falloff beginning beyond 8 m. Accepted trigger pulls consume exactly one loaded shell; rejected cooldown/reload attempts consume none.
+  - All six wall placements charge their canonical price, owned wall weapons refill reserve at the 0.5 price factor, frag resupply fills to four for 250, inventory never exceeds two weapons, and only the active slot is replaced.
+  - Door A/B/C charged exactly 750 / 1,000 / 1,250. A deterministic simultaneous-purchase test and the real network gate both charged exactly one buyer.
+  - Two independent seed-`12345` crate streams reproduced all 200 results exactly. Locked histogram: Jäger 9, Grabenfeger 22, Kurier 23, Sonnenpistole 7, Fernblick 15, Richter 24, Sturmvogel 23, Puppe 31, Doppelhieb 19, Lastträger 10, Kettenhund 13, Blitzwerfer 4. The two wonder weights sum to the specified 5%, and a 1,000-roll held-weapon comparison measured Jäger 65 unheld versus 19 held under the exact 0.25 multiplier.
+  - Seed `9` deterministically produced Puppe, refunded the full 950 after exactly 5,000 ms, closed the crate, reset location uses, and relocated to a different authored site. Normal spins settle after 5,000 ms, remain purchaser-exclusive for 10,000 ms, and then expire.
+  - Frag tests verified 300 close damage, flat +50 explosive kill points, no one-shot beyond 2.5 m, crawler conversion at nonlethal blast range, deterministic fuse cooking, and synchronized inventory consumption.
+  - `npm run gate:p4:network`: room `GCUTJX` resolved a simultaneous Door A interaction to balances `[9750,10500]`, purchased a live wall Jäger, fired all ten conventional weapons with synchronized one-round magazine consumption, rejected a rival during the globally exclusive crate spin, collected/refunded the outcome correctly, and synchronized grenade count from four to three.
+  - Final production client payload: 763.71 kB JS / 205.89 kB gzip before later phase splitting.
+- Browser acceptance:
+  - Production seed `12345` loaded the finished P4 runtime with offline cache `ready`; F1 reported the active crate site and phase, open-door count, grenade stock, complete weapon/ammo state, 60 FPS, and 38 draw calls.
+  - All ten conventional procedural viewmodels were cycled and rendered in the live browser; HUD names and canonical starting magazines read 8, 5, 15, 32, 2, 30, 6, 6, 5, and 125 respectively.
+  - Authored chalk wall-buy panels, three physical crate candidates, active blue shaft, animated lid/weapon roll, synchronized doors, and thrown-frag instances are live scene objects rather than HUD-only state.
+  - The production browser console contained zero errors and zero warnings. The authoritative server gate completed without exceptions or stderr output.
+- Authority/security evidence: solo and co-op share the same economy simulator and isolated crate RNG stream; the server owns spends, inventory, doors, spin exclusivity, outcomes, refunds, and grenades. Versioned gate mutations are rejected whenever `NODE_ENV=production`.
