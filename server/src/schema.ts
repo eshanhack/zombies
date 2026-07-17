@@ -1,5 +1,12 @@
-import { MapSchema, Schema, type } from '@colyseus/schema';
+import { ArraySchema, MapSchema, Schema, type } from '@colyseus/schema';
 import { CONFIG } from '../../src/config.js';
+
+export class NetWeapon extends Schema {
+  @type('string') id: string = 'melder';
+  @type('uint16') magazine: number = CONFIG.weapons.melder.magazine;
+  @type('uint16') reserve: number = CONFIG.weapons.melder.reserve;
+  @type('boolean') upgraded: boolean = false;
+}
 
 export class NetPlayer extends Schema {
   @type('string') id: string = '';
@@ -23,6 +30,15 @@ export class NetPlayer extends Schema {
   @type('boolean') connected: boolean = true;
   @type('boolean') spectating: boolean = false;
   @type('boolean') downed: boolean = false;
+  @type([NetWeapon]) weapons: ArraySchema<NetWeapon> = new ArraySchema<NetWeapon>();
+  @type('uint8') activeWeaponIndex: number = 0;
+  @type('boolean') reloading: boolean = false;
+  @type('float32') reloadRemainingMs: number = 0;
+  @type('uint32') shots: number = 0;
+  @type('uint32') hits: number = 0;
+  @type('uint32') kills: number = 0;
+  @type('uint32') headshots: number = 0;
+  @type('uint32') pointsEarned: number = 0;
 }
 
 export class NetBarrier extends Schema {
@@ -62,6 +78,7 @@ export class BunkerState extends Schema {
   @type('boolean') started: boolean = false;
   @type('boolean') powerOn: boolean = false;
   @type('float64') serverTimeMs: number = 0;
+  @type('float64') simulationTimeMs: number = 0;
   @type({ map: NetPlayer }) players: MapSchema<NetPlayer> = new MapSchema<NetPlayer>();
   @type({ map: NetBarrier }) barriers: MapSchema<NetBarrier> = new MapSchema<NetBarrier>();
   @type({ map: NetEnemy }) enemies: MapSchema<NetEnemy> = new MapSchema<NetEnemy>();

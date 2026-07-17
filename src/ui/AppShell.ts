@@ -25,10 +25,20 @@ export class AppShell {
   private readonly hud: HTMLElement;
   private readonly stamina: HTMLElement;
   private readonly interactionPrompt: HTMLElement;
+  private readonly hitmarker: HTMLElement;
+  private readonly damageVignette: HTMLElement;
+  private readonly pointsValue: HTMLElement;
+  private readonly pointLedger: HTMLElement;
+  private readonly weaponName: HTMLElement;
+  private readonly ammoValue: HTMLElement;
+  private readonly reserveValue: HTMLElement;
+  private readonly reloadStatus: HTMLElement;
+  private readonly roundCanvas: HTMLCanvasElement;
   private readonly lockPrompt: HTMLButtonElement;
   private readonly controllerValue: HTMLElement;
   private readonly handlers: AppShellHandlers;
   private snapshotProvider: () => GameSnapshot | null = () => null;
+  private displayedRound = -1;
 
   constructor(seed: number, scene: PreludeScene, handlers: AppShellHandlers) {
     this.handlers = handlers;
@@ -62,7 +72,7 @@ export class AppShell {
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P2 BARRIERS / ENEMIES</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P3 GUNPLAY / HUD</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -71,6 +81,7 @@ export class AppShell {
         <div><dt>Round</dt><dd data-debug="round">0</dd></div>
         <div><dt>Spawn / alive / queued</dt><dd data-debug="counts">0 / 0 / 0</dd></div>
         <div><dt>HP / points</dt><dd data-debug="vitals">100 / 500</dd></div>
+        <div><dt>Weapon</dt><dd data-debug="weapon">Melder · 8 / 32</dd></div>
         <div><dt>Barrier boards</dt><dd data-debug="barriers">0 / 0</dd></div>
         <div><dt>Enemy states</dt><dd data-debug="enemy-states">none</dd></div>
         <div><dt>Controller</dt><dd data-debug="controller">menu</dd></div>
@@ -84,6 +95,8 @@ export class AppShell {
         <button data-debug-action="noclip">Noclip</button>
         <button data-debug-action="nav">Navgraph</button>
         <button data-debug-action="hp">HP bars</button>
+        <button data-debug-action="jager">Grant Jäger K-8</button>
+        <button data-debug-action="target">Spawn aim target</button>
       </div>
     `;
     this.metricValue = this.overlay.querySelector('[data-debug="metrics"]') as HTMLElement;
@@ -93,14 +106,31 @@ export class AppShell {
 
     this.hud = document.createElement('section');
     this.hud.className = 'game-hud is-hidden';
+    this.hud.style.setProperty('--hitmarker-ms', `${CONFIG.combat.hitmarkerMs}ms`);
+    this.hud.style.setProperty('--damage-ms', `${CONFIG.combat.damageVignetteMs}ms`);
     this.hud.setAttribute('aria-label', 'Player status');
     this.hud.innerHTML = `
       <div class="crosshair" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="hitmarker" aria-hidden="true"><i></i><i></i><i></i><i></i></div>
+      <div class="damage-vignette" aria-hidden="true"></div>
       <div class="interaction-prompt is-hidden" aria-live="polite"></div>
       <div class="stamina-meter" aria-label="Sprint stamina"><span></span></div>
+      <div class="round-hud" aria-label="Current round"><canvas width="180" height="96"></canvas></div>
+      <div class="points-hud"><div class="point-ledger" aria-live="polite"></div><strong>500</strong></div>
+      <div class="weapon-hud"><span class="weapon-name">Melder</span><div><strong class="ammo-value">8</strong><i>/</i><b>32</b></div><small class="reload-status"></small><em>◆ × 4</em></div>
     `;
     this.stamina = this.hud.querySelector('.stamina-meter') as HTMLElement;
     this.interactionPrompt = this.hud.querySelector('.interaction-prompt') as HTMLElement;
+    this.hitmarker = this.hud.querySelector('.hitmarker') as HTMLElement;
+    this.damageVignette = this.hud.querySelector('.damage-vignette') as HTMLElement;
+    this.pointsValue = this.hud.querySelector('.points-hud strong') as HTMLElement;
+    this.pointLedger = this.hud.querySelector('.point-ledger') as HTMLElement;
+    this.weaponName = this.hud.querySelector('.weapon-name') as HTMLElement;
+    this.ammoValue = this.hud.querySelector('.ammo-value') as HTMLElement;
+    this.reserveValue = this.hud.querySelector('.weapon-hud b') as HTMLElement;
+    this.reloadStatus = this.hud.querySelector('.reload-status') as HTMLElement;
+    this.roundCanvas = this.hud.querySelector('.round-hud canvas') as HTMLCanvasElement;
+    this.drawRound(0, false);
     this.root.append(this.hud);
 
     this.lockPrompt = document.createElement('button');
@@ -192,7 +222,20 @@ export class AppShell {
       const metrics = scene.getMetrics();
       this.metricValue.textContent = `${metrics.fps} FPS · ${metrics.drawCalls} calls`;
       const snapshot = this.snapshotProvider();
-      if (snapshot !== null) this.renderSnapshot(snapshot);
+      if (snapshot !== null) {
+        this.renderSnapshot(snapshot);
+        const combat = scene.getSimulationReadout();
+        const weapon = combat?.weapons[combat.activeWeaponIndex];
+        this.pointsValue.textContent = String(combat?.points ?? snapshot.players[0]?.points ?? 0);
+        if (weapon !== undefined) {
+          this.weaponName.textContent = `${weapon.upgraded ? 'Über-' : ''}${CONFIG.weapons[weapon.id].name}`;
+          this.ammoValue.textContent = String(weapon.magazine);
+          this.reserveValue.textContent = String(weapon.reserve);
+          this.reloadStatus.textContent = combat?.reloading ? `RELOADING · ${(combat.reloadRemainingMs / 1000).toFixed(1)}s` : '';
+        }
+        this.hud.classList.toggle('is-low-health', (combat?.hp ?? CONFIG.player.maxHp) < CONFIG.player.maxHp * 0.3);
+      }
+      for (const event of scene.drainHudEvents()) this.renderHudEvent(event);
       const controller = scene.getControllerReadout();
       if (controller !== null) {
         const staminaPercent = controller.staminaMs / CONFIG.player.sprintMaxMs;
@@ -204,7 +247,7 @@ export class AppShell {
       const interaction = scene.getInteractionPrompt();
       this.interactionPrompt.textContent = interaction ?? '';
       this.interactionPrompt.classList.toggle('is-hidden', interaction === null);
-    }, 250);
+    }, 50);
   }
 
   setSnapshotProvider(provider: () => GameSnapshot | null): void {
@@ -285,11 +328,89 @@ export class AppShell {
     (this.overlay.querySelector('[data-debug="counts"]') as HTMLElement).textContent = `${snapshot.spawned} / ${alive} / ${snapshot.queued}`;
     const player = snapshot.players[0];
     (this.overlay.querySelector('[data-debug="vitals"]') as HTMLElement).textContent = `${player?.hp ?? 0} / ${player?.points ?? 0}`;
+    const weapon = player?.weapons[player.activeWeaponIndex];
+    (this.overlay.querySelector('[data-debug="weapon"]') as HTMLElement).textContent = weapon === undefined
+      ? 'none'
+      : `${weapon.upgraded ? 'Über-' : ''}${CONFIG.weapons[weapon.id].name} · ${weapon.magazine} / ${weapon.reserve}`;
     const boardCount = snapshot.barriers.reduce((total, barrier) => total + barrier.boards, 0);
     (this.overlay.querySelector('[data-debug="barriers"]') as HTMLElement).textContent = `${boardCount} / ${snapshot.barriers.length * CONFIG.barriers.boardSlots}`;
     const stateCounts = new Map<string, number>();
     for (const enemy of snapshot.enemies) stateCounts.set(enemy.state, (stateCounts.get(enemy.state) ?? 0) + 1);
     (this.overlay.querySelector('[data-debug="enemy-states"]') as HTMLElement).textContent = [...stateCounts].map(([state, count]) => `${state}:${count}`).join(' · ') || 'none';
+    if (snapshot.round !== this.displayedRound) {
+      this.displayedRound = snapshot.round;
+      this.drawRound(snapshot.round, snapshot.round > 0);
+    }
+  }
+
+  private renderHudEvent(event: ReturnType<PreludeScene['drainHudEvents']>[number]): void {
+    if (event.type === 'hit') {
+      this.hitmarker.classList.toggle('is-headshot', event.headshot);
+      this.restartAnimation(this.hitmarker, 'is-active');
+    }
+    if (event.type === 'shot') this.restartAnimation(this.hud.querySelector('.crosshair') as HTMLElement, 'is-firing');
+    if (event.type === 'damage') {
+      this.damageVignette.style.setProperty('--damage-angle', `${event.directionDeg}deg`);
+      this.restartAnimation(this.damageVignette, 'is-active');
+    }
+    if (event.type === 'points') {
+      const entry = document.createElement('span');
+      entry.textContent = `${event.amount >= 0 ? '+' : ''}${event.amount}`;
+      entry.title = event.reason;
+      entry.className = event.amount >= 0 ? 'is-gain' : 'is-spend';
+      entry.style.animationDuration = `${CONFIG.combat.pointLedgerMs}ms`;
+      this.pointLedger.append(entry);
+      window.setTimeout(() => entry.remove(), CONFIG.combat.pointLedgerMs);
+    }
+  }
+
+  private restartAnimation(element: HTMLElement, className: string): void {
+    element.classList.remove(className);
+    void element.offsetWidth;
+    element.classList.add(className);
+  }
+
+  private drawRound(round: number, flare: boolean): void {
+    const context = this.roundCanvas.getContext('2d');
+    if (context === null) return;
+    context.clearRect(0, 0, this.roundCanvas.width, this.roundCanvas.height);
+    if (round <= 0) return;
+    context.lineCap = 'round';
+    context.lineJoin = 'round';
+    context.strokeStyle = '#8d171c';
+    context.fillStyle = '#8d171c';
+    context.shadowColor = '#2a0204';
+    context.shadowBlur = 4;
+    if (round <= 5) {
+      context.lineWidth = 6;
+      const baseX = 45;
+      for (let index = 0; index < Math.min(round, 4); index += 1) {
+        const jitter = distressedNoise(round * 31 + index * 7) * 3;
+        context.beginPath();
+        context.moveTo(baseX + index * 22 + jitter, 18 + distressedNoise(index + 3) * 3);
+        context.lineTo(baseX + index * 22 - jitter, 78 + distressedNoise(index + 11) * 3);
+        context.stroke();
+      }
+      if (round === 5) {
+        context.beginPath();
+        context.moveTo(34, 69);
+        context.lineTo(125, 25);
+        context.stroke();
+      }
+    } else {
+      context.font = '78px Impact, Haettenschweiler, sans-serif';
+      context.textAlign = 'center';
+      context.textBaseline = 'middle';
+      for (const offset of [-2, 0, 2]) context.fillText(String(round), 90 + offset, 51 + distressedNoise(round + offset) * 2);
+      context.globalCompositeOperation = 'destination-out';
+      for (let index = 0; index < 18; index += 1) {
+        const x = 48 + distressedNoise(round * 97 + index) * 84;
+        const y = 14 + distressedNoise(round * 53 + index * 3) * 68;
+        context.fillRect(x, y, 1 + index % 3, 2 + index % 4);
+      }
+      context.globalCompositeOperation = 'source-over';
+    }
+    if (flare) this.restartAnimation(this.roundCanvas, 'is-flaring');
   }
 
   private bindSettings(): void {
@@ -327,4 +448,9 @@ export class AppShell {
       return 0;
     }
   }
+}
+
+function distressedNoise(seed: number): number {
+  const value = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
+  return value - Math.floor(value);
 }

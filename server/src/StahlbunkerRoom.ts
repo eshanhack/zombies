@@ -9,8 +9,9 @@ import {
   simulatePlayerMovement,
   type MovementInput,
 } from '../../src/shared/movement.js';
-import { GameSimulation, type SimBarrier, type SimEnemy } from '../../src/shared/GameSimulation.js';
-import { BunkerState, NetBarrier, NetEnemy, NetPlayer } from './schema.js';
+import { GameSimulation, type SimBarrier, type SimEnemy, type SimulationEvent } from '../../src/shared/GameSimulation.js';
+import type { CombatPlayerState } from '../../src/shared/combat.js';
+import { BunkerState, NetBarrier, NetEnemy, NetPlayer, NetWeapon } from './schema.js';
 
 interface JoinOptions {
   name?: string;
@@ -18,8 +19,10 @@ interface JoinOptions {
 }
 
 interface ActionMessage {
-  type: 'melee' | 'repair';
+  type: 'melee' | 'repair' | 'fire' | 'reload' | 'switch';
   held?: boolean;
+  ads?: boolean;
+  index?: number;
 }
 
 const ROOM_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -70,6 +73,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       const simulation = this.simulation;
       if (simulation !== null) {
         simulation.update(1000 / CONFIG.simulation.hz, players);
+        this.publishSimulationEvents(simulation.drainEvents());
         this.syncSimulation(simulation);
       }
     }, 1000 / CONFIG.simulation.hz);
@@ -100,9 +104,21 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.onMessage('action', (client, action: ActionMessage) => {
       const simulation = this.simulation;
       const player = this.state.players.get(client.sessionId);
-      if (simulation === null || player === undefined || player.spectating || player.downed) return;
-      if (action.type === 'melee') simulation.melee(player);
+      if (simulation === null || player === undefined || player.spectating || player.downed || action === null || typeof action !== 'object') return;
+      if (action.type === 'melee') {
+        const result = simulation.melee(player);
+        client.send('combatFeedback', { source: 'melee', ...result });
+        if (result.points > 0) this.logPointTransaction(player.id, result.points, 'melee kill');
+      }
       if (action.type === 'repair') simulation.setRepairHeld(client.sessionId, action.held === true);
+      if (action.type === 'fire') {
+        const result = simulation.fire(player, action.ads === true);
+        client.send('combatFeedback', { source: 'fire', ...result });
+        if (result.points > 0) this.logPointTransaction(player.id, result.points, result.headshot ? 'headshot bullet' : 'body bullet');
+      }
+      if (action.type === 'reload') client.send('reloadFeedback', simulation.requestReload(player.id));
+      if (action.type === 'switch' && Number.isInteger(action.index)) simulation.switchWeapon(player.id, action.index ?? -1);
+      this.syncSimulation(simulation);
     });
     this.onMessage('ping', (client, sentAt: number) => client.send('pong', sentAt));
   }
@@ -115,6 +131,8 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     player.x = spawn.x;
     player.y = spawn.y;
     player.z = spawn.z;
+    const starter = new NetWeapon();
+    player.weapons.push(starter);
     this.state.players.set(client.sessionId, player);
     if (this.state.hostId === '') this.state.hostId = client.sessionId;
 
@@ -145,6 +163,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     this.state.spawned = simulation.spawnedThisRound;
     this.state.queued = simulation.queued;
     this.state.alive = simulation.aliveCount;
+    this.state.simulationTimeMs = simulation.elapsedMs;
     this.state.phase = simulation.phase === 'active' ? 'playing' : 'intermission';
 
     for (const barrier of simulation.barriers.values()) this.syncBarrier(barrier);
@@ -154,6 +173,56 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
     for (const enemy of simulation.enemies.values()) this.syncEnemy(enemy);
     const activeEnemyIds = new Set([...simulation.enemies.keys()].map(String));
     for (const id of this.state.enemies.keys()) if (!activeEnemyIds.has(id)) this.state.enemies.delete(id);
+    for (const player of this.state.players.values()) this.syncCombatPlayer(player, simulation.getCombatState(player.id), simulation.elapsedMs);
+  }
+
+  private syncCombatPlayer(player: NetPlayer, source: CombatPlayerState, elapsedMs: number): void {
+    if (player.weapons.length !== source.weapons.length || source.weapons.some((weapon, index) => player.weapons[index]?.id !== weapon.id)) {
+      player.weapons.splice(0, player.weapons.length);
+      for (const sourceWeapon of source.weapons) {
+        const weapon = new NetWeapon();
+        weapon.id = sourceWeapon.id;
+        player.weapons.push(weapon);
+      }
+    }
+    for (let index = 0; index < source.weapons.length; index += 1) {
+      const sourceWeapon = source.weapons[index];
+      const targetWeapon = player.weapons[index];
+      if (sourceWeapon === undefined || targetWeapon === undefined) continue;
+      targetWeapon.id = sourceWeapon.id;
+      targetWeapon.magazine = sourceWeapon.magazine;
+      targetWeapon.reserve = sourceWeapon.reserve;
+      targetWeapon.upgraded = sourceWeapon.upgraded;
+    }
+    player.activeWeaponIndex = source.activeWeaponIndex;
+    player.reloading = source.reloadingWeaponIndex >= 0;
+    player.reloadRemainingMs = player.reloading ? Math.max(0, source.reloadFinishAtMs - elapsedMs) : 0;
+    player.shots = source.shots;
+    player.hits = source.hits;
+    player.kills = source.kills;
+    player.headshots = source.headshots;
+    player.pointsEarned = source.pointsEarned;
+  }
+
+  private publishSimulationEvents(events: readonly SimulationEvent[]): void {
+    for (const event of events) {
+      if (event.type === 'boardRepaired') {
+        this.clientBySessionId(event.playerId)?.send('pointTransaction', { amount: event.points, reason: 'barrier repair' });
+        this.logPointTransaction(event.playerId, event.points, 'barrier repair');
+      }
+      if (event.type === 'playerDamaged') {
+        this.clientBySessionId(event.playerId)?.send('damageFeedback', { amount: event.damage, enemyId: event.enemyId });
+      }
+    }
+  }
+
+  private clientBySessionId(sessionId: string): Client | undefined {
+    return this.clients.find((client) => client.sessionId === sessionId);
+  }
+
+  private logPointTransaction(playerId: string, amount: number, reason: string): void {
+    if (process.env.NODE_ENV === 'production') return;
+    console.log(`[points] ${playerId} ${amount >= 0 ? '+' : ''}${amount} ${reason}`);
   }
 
   private syncBarrier(source: SimBarrier): void {

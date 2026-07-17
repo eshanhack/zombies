@@ -1,9 +1,19 @@
-import { CONFIG, type RoomId } from '../config.js';
+import { CONFIG, type RoomId, type WeaponId } from '../config.js';
 import { DOORS, WINDOWS, type WindowBlueprint } from '../map/blueprint.js';
 import { NAV_NODE_BY_ID } from '../map/navgraph.js';
 import { coopZombieCount, soloZombieCount, spawnIntervalMs, zombieHealth } from './formulas.js';
 import { findNavPath, nearestNavNode } from './navigation.js';
 import { createRngStreams, type RngStreams } from './rng.js';
+import {
+  activeWeapon,
+  createCombatPlayerState,
+  rayAabbDistance,
+  raySphereDistance,
+  shotDirection,
+  type CombatPlayerState,
+  type FireResult,
+  type ReloadResult,
+} from './combat.js';
 
 export type SimulationMode = 'solo' | 'coop';
 export type EnemySpeedTier = 'walk' | 'jog' | 'sprint';
@@ -17,6 +27,7 @@ export interface SimPlayer {
   y: number;
   z: number;
   yaw: number;
+  pitch: number;
   hp: number;
   maxHp: number;
   points: number;
@@ -71,7 +82,7 @@ export type SimulationEvent =
   | { type: 'boardRepaired'; barrierId: string; boards: number; playerId: string; points: number }
   | { type: 'vaultStarted'; enemyId: number; barrierId: string }
   | { type: 'playerDamaged'; playerId: string; enemyId: number; damage: number }
-  | { type: 'enemyKilled'; enemyId: number; playerId?: string; method: 'melee' | 'explosive' | 'debug' }
+  | { type: 'enemyKilled'; enemyId: number; playerId?: string; method: 'melee' | 'explosive' | 'bullet' | 'debug' }
   | { type: 'roundStarted'; round: number; count: number }
   | { type: 'roundEnded'; round: number };
 
@@ -100,6 +111,7 @@ export class GameSimulation {
   private readonly repairHeld = new Set<string>();
   private readonly repairByPlayer = new Map<string, { barrierId: string; progressMs: number }>();
   private readonly meleeReadyAt = new Map<string, number>();
+  private readonly combatByPlayer = new Map<string, CombatPlayerState>();
   private nextEnemyId = 1;
   private spawnInMs = 0;
 
@@ -117,6 +129,7 @@ export class GameSimulation {
   update(deltaMs: number, players: readonly SimPlayer[]): void {
     const delta = Math.min(Math.max(deltaMs, 0), CONFIG.simulation.maxFrameDeltaMs);
     this.elapsedMs += delta;
+    this.updateCombat(players);
     if (this.phase === 'intermission') {
       this.intermissionRemainingMs = Math.max(0, this.intermissionRemainingMs - delta);
       if (this.intermissionRemainingMs === 0) this.beginRound(this.round + 1);
@@ -148,6 +161,134 @@ export class GameSimulation {
 
   getRepairTarget(player: SimPlayer): SimBarrier | null {
     return this.nearestRepairableBarrier(player);
+  }
+
+  getCombatState(playerId: string): CombatPlayerState {
+    let state = this.combatByPlayer.get(playerId);
+    if (state === undefined) {
+      state = createCombatPlayerState();
+      this.combatByPlayer.set(playerId, state);
+    }
+    return state;
+  }
+
+  grantWeapon(playerId: string, weaponId: WeaponId): CombatPlayerState {
+    const state = this.getCombatState(playerId);
+    const existingIndex = state.weapons.findIndex((weapon) => weapon.id === weaponId);
+    if (existingIndex >= 0) {
+      state.activeWeaponIndex = existingIndex;
+      return state;
+    }
+    const definition = CONFIG.weapons[weaponId];
+    const weapon = { id: weaponId, magazine: definition.magazine, reserve: definition.reserve, upgraded: false };
+    if (state.weapons.length < CONFIG.combat.maxWeapons) {
+      state.weapons.push(weapon);
+      state.activeWeaponIndex = state.weapons.length - 1;
+    } else {
+      state.weapons[state.activeWeaponIndex] = weapon;
+    }
+    this.cancelReload(state);
+    return state;
+  }
+
+  switchWeapon(playerId: string, index: number): boolean {
+    const state = this.getCombatState(playerId);
+    if (!Number.isInteger(index) || index < 0 || index >= state.weapons.length || index === state.activeWeaponIndex) return false;
+    state.activeWeaponIndex = index;
+    this.cancelReload(state);
+    return true;
+  }
+
+  requestReload(playerId: string): ReloadResult {
+    const state = this.getCombatState(playerId);
+    const weapon = activeWeapon(state);
+    const definition = CONFIG.weapons[weapon.id];
+    const accepted = state.reloadingWeaponIndex < 0 && weapon.magazine < definition.magazine && weapon.reserve > 0;
+    if (accepted) {
+      state.reloadingWeaponIndex = state.activeWeaponIndex;
+      state.reloadFinishAtMs = this.elapsedMs + definition.reloadMs;
+    }
+    return {
+      accepted,
+      weaponId: weapon.id,
+      magazine: weapon.magazine,
+      reserve: weapon.reserve,
+      finishAtMs: accepted ? state.reloadFinishAtMs : 0,
+    };
+  }
+
+  fire(player: SimPlayer, ads: boolean): FireResult {
+    const state = this.getCombatState(player.id);
+    const weapon = activeWeapon(state);
+    const definition = CONFIG.weapons[weapon.id];
+    const rejected = (reason: FireResult['reason']): FireResult => ({
+      accepted: false,
+      reason,
+      weaponId: weapon.id,
+      magazine: weapon.magazine,
+      reserve: weapon.reserve,
+      hit: false,
+      headshot: false,
+      killed: false,
+      enemyId: null,
+      damage: 0,
+      points: 0,
+    });
+    if (!player.connected || player.downed) return rejected('unavailable');
+    if (state.reloadingWeaponIndex >= 0) return rejected('reloading');
+    if (this.elapsedMs < state.nextFireAtMs) return rejected('cooldown');
+    if (weapon.magazine <= 0) return rejected('empty');
+
+    weapon.magazine -= 1;
+    state.nextFireAtMs = this.elapsedMs + 60000 / definition.rpm;
+    state.shots += 1;
+    const origin = { x: player.x, y: player.y + CONFIG.controller.eyeHeightM, z: player.z };
+    const direction = shotDirection(player.yaw, player.pitch, ads ? definition.spreadAds : definition.spreadHip, this.rng.spread);
+    const target = this.nearestShotTarget(origin, direction);
+    if (target === null) {
+      return {
+        accepted: true,
+        reason: 'fired',
+        weaponId: weapon.id,
+        magazine: weapon.magazine,
+        reserve: weapon.reserve,
+        hit: false,
+        headshot: false,
+        killed: false,
+        enemyId: null,
+        damage: 0,
+        points: 0,
+      };
+    }
+
+    const damageMultiplier = weapon.upgraded ? CONFIG.forge.damageMultiplier : 1;
+    const damage = definition.damage * (target.headshot ? definition.headMultiplier : 1) * damageMultiplier;
+    target.enemy.hp = Math.max(0, target.enemy.hp - damage);
+    target.enemy.crawlerUntouchedMs = 0;
+    const killed = target.enemy.hp === 0;
+    let points = CONFIG.points.bulletHit;
+    if (killed) points += target.headshot ? CONFIG.points.killBonusHead : CONFIG.points.killBonusBody;
+    player.points += points;
+    state.pointsEarned += points;
+    state.hits += 1;
+    if (killed) {
+      state.kills += 1;
+      if (target.headshot) state.headshots += 1;
+      this.killEnemy(target.enemy, 'bullet', player.id);
+    }
+    return {
+      accepted: true,
+      reason: 'fired',
+      weaponId: weapon.id,
+      magazine: weapon.magazine,
+      reserve: weapon.reserve,
+      hit: true,
+      headshot: target.headshot,
+      killed,
+      enemyId: target.enemy.id,
+      damage,
+      points,
+    };
   }
 
   melee(player: SimPlayer): MeleeResult {
@@ -447,6 +588,60 @@ export class GameSimulation {
     return nearest;
   }
 
+  private updateCombat(players: readonly SimPlayer[]): void {
+    for (const player of players) {
+      const state = this.getCombatState(player.id);
+      if (state.reloadingWeaponIndex < 0 || this.elapsedMs < state.reloadFinishAtMs) continue;
+      const weapon = state.weapons[state.reloadingWeaponIndex];
+      if (weapon !== undefined) {
+        const capacity = CONFIG.weapons[weapon.id].magazine;
+        const transfer = Math.min(capacity - weapon.magazine, weapon.reserve);
+        weapon.magazine += transfer;
+        weapon.reserve -= transfer;
+      }
+      this.cancelReload(state);
+    }
+  }
+
+  private cancelReload(state: CombatPlayerState): void {
+    state.reloadingWeaponIndex = -1;
+    state.reloadFinishAtMs = 0;
+  }
+
+  private nearestShotTarget(
+    origin: { x: number; y: number; z: number },
+    direction: { x: number; y: number; z: number },
+  ): { enemy: SimEnemy; headshot: boolean; distance: number } | null {
+    let nearest: { enemy: SimEnemy; headshot: boolean; distance: number } | null = null;
+    for (const enemy of this.enemies.values()) {
+      if (enemy.state === 'dead') continue;
+      const heightScale = enemy.kind === 'crawler' ? CONFIG.combat.crawlerHitboxHeightScale : 1;
+      const spawnOffset = enemy.state === 'spawn'
+        ? -(1 - enemy.spawnProgress) * CONFIG.rendering.zombieVisual.spawnDepthM
+        : 0;
+      const baseY = enemy.y + spawnOffset;
+      const headDistance = raySphereDistance(origin, direction, {
+        x: enemy.x,
+        y: baseY + CONFIG.combat.headCenterHeightM * heightScale,
+        z: enemy.z,
+      }, CONFIG.combat.headRadiusM);
+      const bodyDistance = rayAabbDistance(origin, direction, {
+        x: enemy.x - CONFIG.combat.bodyHalfWidthM,
+        y: baseY + CONFIG.combat.bodyBottomHeightM * heightScale,
+        z: enemy.z - CONFIG.combat.bodyHalfWidthM,
+      }, {
+        x: enemy.x + CONFIG.combat.bodyHalfWidthM,
+        y: baseY + CONFIG.combat.bodyTopHeightM * heightScale,
+        z: enemy.z + CONFIG.combat.bodyHalfWidthM,
+      });
+      const headshot = headDistance !== null && (bodyDistance === null || headDistance <= bodyDistance);
+      const distance = headshot ? headDistance : bodyDistance;
+      if (distance === null || distance > CONFIG.combat.hitscanRangeM || (nearest !== null && distance >= nearest.distance)) continue;
+      nearest = { enemy, headshot, distance };
+    }
+    return nearest;
+  }
+
   private updateDead(deltaMs: number): void {
     for (const [id, enemy] of this.enemies) {
       if (enemy.state !== 'dead') continue;
@@ -476,7 +671,7 @@ export class GameSimulation {
     this.events.push({ type: 'playerDamaged', playerId: player.id, enemyId: enemy.id, damage: CONFIG.zombie.hitDamage });
   }
 
-  private killEnemy(enemy: SimEnemy, method: 'melee' | 'explosive' | 'debug', playerId?: string): void {
+  private killEnemy(enemy: SimEnemy, method: 'melee' | 'explosive' | 'debug' | 'bullet', playerId?: string): void {
     enemy.hp = 0;
     this.changeState(enemy, 'dead');
     this.events.push({ type: 'enemyKilled', enemyId: enemy.id, playerId, method });

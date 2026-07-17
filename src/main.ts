@@ -52,14 +52,24 @@ const getSnapshot = (): GameSnapshot => {
     maxHp: simulation?.maxHp ?? CONFIG.player.maxHp,
     points: simulation?.points ?? CONFIG.points.starting,
     staminaMs: controller.staminaMs,
-    weapons: [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false }],
-    activeWeaponIndex: 0,
+    weapons: simulation?.weapons.map((weapon) => ({ ...weapon })) ?? [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false }],
+    activeWeaponIndex: simulation?.activeWeaponIndex ?? 0,
     grenades: CONFIG.combat.maxGrenades,
     perks: [],
     downed: (simulation?.hp ?? CONFIG.player.maxHp) <= 0,
     spectating: false,
     connected: true,
-    stats: { kills: 0, headshots: 0, shots: 0, hits: 0, pointsEarned: 0, doorsOpened: 0, crateRolls: 0, revives: 0, downs: 0 },
+    stats: {
+      kills: simulation?.stats.kills ?? 0,
+      headshots: simulation?.stats.headshots ?? 0,
+      shots: simulation?.stats.shots ?? 0,
+      hits: simulation?.stats.hits ?? 0,
+      pointsEarned: simulation?.stats.pointsEarned ?? 0,
+      doorsOpened: 0,
+      crateRolls: 0,
+      revives: 0,
+      downs: 0,
+    },
   }];
   return {
     seed: activeSeed,
@@ -159,6 +169,7 @@ coop.onMovement((local, players) => {
   scene.updateRemotePlayers(players);
 });
 coop.onSimulation((view) => scene.applyNetworkSimulation(view));
+coop.onFeedback((feedback) => scene.applyNetworkFeedback(feedback));
 
 window.__STAHLBUNKER_DEBUG__ = {
   version: 1,

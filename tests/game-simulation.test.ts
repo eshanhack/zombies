@@ -9,6 +9,7 @@ function player(overrides: Partial<SimPlayer> = {}): SimPlayer {
     y: 0,
     z: -1.5,
     yaw: 0,
+    pitch: 0,
     hp: CONFIG.player.maxHp,
     maxHp: CONFIG.player.maxHp,
     points: CONFIG.points.starting,

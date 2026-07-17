@@ -104,6 +104,10 @@ export const CONFIG = {
     seedFallback: 1945,
   },
 
+  debug: {
+    aimTargetDistanceM: 3,
+  },
+
   controller: {
     capsuleRadiusM: 0.35,
     capsuleHeightM: 1.75,
@@ -157,6 +161,12 @@ export const CONFIG = {
 
   combat: {
     hitscanRangeM: 100,
+    headRadiusM: 0.23,
+    headCenterHeightM: 1.52,
+    bodyHalfWidthM: 0.3,
+    bodyBottomHeightM: 0.22,
+    bodyTopHeightM: 1.32,
+    crawlerHitboxHeightScale: 0.48,
     shotgunFalloffStartM: 8,
     shotgunFalloffEndM: 20,
     grenadeFuseMs: 4000,
@@ -167,6 +177,9 @@ export const CONFIG = {
     crawlerBleedoutMs: 300000,
     maxGrenades: 4,
     maxWeapons: 2,
+    hitmarkerMs: 115,
+    damageVignetteMs: 620,
+    pointLedgerMs: 1800,
   },
 
   weapons: {
@@ -332,6 +345,12 @@ export const CONFIG = {
       rotationLerpPerSecond: 14,
       meleeYawRad: -0.9,
       meleeDropM: 0.13,
+      recoilPositionM: 0.075,
+      recoilPitchMultiplier: 0.72,
+      muzzleOffset: [0, 0.015, -0.54],
+      reloadDropM: 0.24,
+      reloadRollRad: 0.52,
+      jagerScale: 1.15,
     },
     zombieVisual: {
       spawnDepthM: 1.35,
@@ -353,6 +372,15 @@ export const CONFIG = {
     referenceDistanceM: 2,
     reverbSeconds: 1.15,
     reverbDecay: 2.6,
+    hitmarkerFrequencyHz: 1850,
+    hitmarkerDurationMs: 42,
+    emptyClickFrequencyHz: 420,
+    weaponProfiles: {
+      melder: { crackHz: 128, noiseMs: 82, gain: 0.34, filterHz: 2350 },
+      jaeger: { crackHz: 82, noiseMs: 145, gain: 0.5, filterHz: 1650 },
+    },
+    reloadClickFrequencyHz: 690,
+    reloadClickMs: 34,
   },
 
   storage: {

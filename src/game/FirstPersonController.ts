@@ -17,6 +17,9 @@ export interface ControllerOptions {
   sendInput?: (input: MovementInput) => void;
   onMelee?: () => void;
   onInteractChange?: (held: boolean) => void;
+  onFire?: () => void;
+  onReload?: () => void;
+  onSwitchWeapon?: (index: number) => void;
 }
 
 export interface ControllerReadout extends KinematicState {
@@ -42,11 +45,16 @@ export class FirstPersonController {
   private readonly sendInput?: (input: MovementInput) => void;
   private readonly onMelee?: () => void;
   private readonly onInteractChange?: (held: boolean) => void;
+  private readonly onFire?: () => void;
+  private readonly onReload?: () => void;
+  private readonly onSwitchWeapon?: (index: number) => void;
   private readonly pressed = new Set<string>();
   private readonly predictedSteps: PredictedStep[] = [];
   private state: KinematicState;
   private yaw = 0;
   private pitch = 0;
+  private recoilYaw = 0;
+  private recoilPitch = 0;
   private ads = false;
   private sprinting = false;
   private noclip = false;
@@ -61,6 +69,9 @@ export class FirstPersonController {
     this.sendInput = options.sendInput;
     this.onMelee = options.onMelee;
     this.onInteractChange = options.onInteractChange;
+    this.onFire = options.onFire;
+    this.onReload = options.onReload;
+    this.onSwitchWeapon = options.onSwitchWeapon;
     this.state = {
       ...options.startPosition,
       vx: 0,
@@ -92,6 +103,14 @@ export class FirstPersonController {
       if (this.predictedSteps.length > CONFIG.controller.maxPredictionHistory) this.predictedSteps.shift();
       if (this.fixedTick % (CONFIG.simulation.hz / CONFIG.coop.inputHz) === 0) this.sendInput?.(input);
     }
+    const recovery = Math.min(1, 1000 / CONFIG.simulation.hz / CONFIG.controller.recoilRecoveryMs);
+    this.recoilYaw = THREE.MathUtils.lerp(this.recoilYaw, 0, recovery);
+    this.recoilPitch = THREE.MathUtils.lerp(this.recoilPitch, 0, recovery);
+  }
+
+  applyRecoil(vertical: number, horizontal: number): void {
+    this.recoilPitch = THREE.MathUtils.clamp(this.recoilPitch + vertical, -CONFIG.controller.pitchLimitRad, CONFIG.controller.pitchLimitRad);
+    this.recoilYaw += horizontal;
   }
 
   reconcile(authoritative: AuthoritativePlayerState): void {
@@ -139,8 +158,8 @@ export class FirstPersonController {
   getReadout(): ControllerReadout {
     return {
       ...this.state,
-      yaw: this.yaw,
-      pitch: this.pitch,
+      yaw: this.yaw + this.recoilYaw,
+      pitch: THREE.MathUtils.clamp(this.pitch + this.recoilPitch, -CONFIG.controller.pitchLimitRad, CONFIG.controller.pitchLimitRad),
       ads: this.ads,
       sprinting: this.sprinting,
       noclip: this.noclip,
@@ -151,7 +170,11 @@ export class FirstPersonController {
   applyCamera(camera: THREE.PerspectiveCamera): void {
     camera.position.set(this.state.x, this.state.y + CONFIG.controller.eyeHeightM, this.state.z);
     camera.rotation.order = 'YXZ';
-    camera.rotation.set(this.pitch, this.yaw, 0);
+    camera.rotation.set(
+      THREE.MathUtils.clamp(this.pitch + this.recoilPitch, -CONFIG.controller.pitchLimitRad, CONFIG.controller.pitchLimitRad),
+      this.yaw + this.recoilYaw,
+      0,
+    );
   }
 
   dispose(): void {
@@ -173,8 +196,8 @@ export class FirstPersonController {
       sequence: this.sequence,
       forward: Number(this.pressed.has('KeyW')) - Number(this.pressed.has('KeyS')),
       right: Number(this.pressed.has('KeyD')) - Number(this.pressed.has('KeyA')),
-      yaw: this.yaw,
-      pitch: this.pitch,
+      yaw: this.yaw + this.recoilYaw,
+      pitch: THREE.MathUtils.clamp(this.pitch + this.recoilPitch, -CONFIG.controller.pitchLimitRad, CONFIG.controller.pitchLimitRad),
       sprint: this.pressed.has('ShiftLeft') || this.pressed.has('ShiftRight'),
       ads: this.ads,
       ascend: this.pressed.has('Space'),
@@ -186,6 +209,9 @@ export class FirstPersonController {
     this.pressed.add(event.code);
     if (event.code === 'KeyV' && !event.repeat) this.onMelee?.();
     if (event.code === 'KeyF' && !event.repeat) this.onInteractChange?.(true);
+    if (event.code === 'KeyR' && !event.repeat) this.onReload?.();
+    if (event.code === 'Digit1' && !event.repeat) this.onSwitchWeapon?.(0);
+    if (event.code === 'Digit2' && !event.repeat) this.onSwitchWeapon?.(1);
   };
 
   private readonly onKeyUp = (event: KeyboardEvent): void => {
@@ -206,6 +232,7 @@ export class FirstPersonController {
   private readonly onMouseDown = (event: MouseEvent): void => {
     if (event.button === 2) this.ads = true;
     if (event.button === 1) this.onMelee?.();
+    if (event.button === 0 && event.target === this.canvas) this.onFire?.();
   };
 
   private readonly onMouseUp = (event: MouseEvent): void => {

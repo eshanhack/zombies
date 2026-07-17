@@ -1,13 +1,15 @@
 import * as THREE from 'three';
-import { CONFIG } from '../config.js';
+import { CONFIG, type WeaponId } from '../config.js';
+import { AudioSystem } from '../audio/AudioSystem.js';
 import { DOORS, START_POSITIONS, WINDOWS } from '../map/blueprint.js';
 import { SeededRng } from '../shared/rng.js';
 import type { MovementInput } from '../shared/movement.js';
 import { GameSimulation, type SimPlayer } from '../shared/GameSimulation.js';
+import { type CombatPlayerState, type FireResult, type RuntimeWeaponState } from '../shared/combat.js';
 import { BunkerMap } from './BunkerMap.js';
 import { EnemyRenderer, type EnemyVisualState } from './EnemyRenderer.js';
 import { FirstPersonController, type AuthoritativePlayerState, type ControllerReadout } from './FirstPersonController.js';
-import type { NetworkGameView } from '../network/CoopClient.js';
+import type { ClientAction, NetworkFeedback, NetworkGameView } from '../network/CoopClient.js';
 
 export interface SceneMetrics {
   fps: number;
@@ -28,7 +30,7 @@ export interface GameplayOptions {
   mode: 'solo' | 'coop';
   seed: number;
   sendInput?: (input: MovementInput) => void;
-  sendAction?: (action: { type: 'melee' } | { type: 'repair'; held: boolean }) => void;
+  sendAction?: (action: ClientAction) => void;
 }
 
 export interface SceneSimulationReadout {
@@ -41,6 +43,11 @@ export interface SceneSimulationReadout {
   hp: number;
   maxHp: number;
   points: number;
+  weapons: readonly RuntimeWeaponState[];
+  activeWeaponIndex: number;
+  reloading: boolean;
+  reloadRemainingMs: number;
+  stats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number };
   barriers: readonly { id: string; room: string; boards: number; repairProgressMs: number }[];
   enemies: readonly SceneEnemyReadout[];
 }
@@ -52,6 +59,18 @@ export interface SceneEnemyReadout extends EnemyVisualState {
   barrierId: string;
   targetPlayerId: string;
 }
+
+export type HudEvent =
+  | { id: number; type: 'points'; amount: number; reason: string }
+  | { id: number; type: 'hit'; headshot: boolean; killed: boolean }
+  | { id: number; type: 'damage'; amount: number; directionDeg: number }
+  | { id: number; type: 'shot' };
+
+type HudEventInput =
+  | { type: 'points'; amount: number; reason: string }
+  | { type: 'hit'; headshot: boolean; killed: boolean }
+  | { type: 'damage'; amount: number; directionDeg: number }
+  | { type: 'shot' };
 
 interface RemoteVisual {
   group: THREE.Group;
@@ -68,6 +87,8 @@ export class PreludeScene {
   private readonly menuRoot = new THREE.Group();
   private readonly remoteRoot = new THREE.Group();
   private readonly remotePlayers = new Map<string, RemoteVisual>();
+  private readonly audio = new AudioSystem();
+  private cosmeticRng: SeededRng;
   private fogParticles: THREE.Points | null = null;
   private lamp: THREE.PointLight | null = null;
   private bunkerMap: BunkerMap | null = null;
@@ -78,6 +99,8 @@ export class PreludeScene {
   private networkSimulation: NetworkGameView | null = null;
   private sendAction: GameplayOptions['sendAction'];
   private viewmodel: THREE.Group | null = null;
+  private muzzleLight: THREE.PointLight | null = null;
+  private viewmodelWeaponId: WeaponId = 'melder';
   private mode: 'menu' | 'gameplay' = 'menu';
   private gameMode: 'solo' | 'coop' = 'solo';
   private frameHandle = 0;
@@ -86,10 +109,18 @@ export class PreludeScene {
   private sampledFrames = 0;
   private gameplayElapsed = 0;
   private meleeAnimationRemainingMs = 0;
+  private reloadAnimationRemainingMs = 0;
+  private viewmodelRecoilM = 0;
+  private muzzleRemainingMs = 0;
+  private nextCosmeticFireAtMs = 0;
+  private hudEventSequence = 0;
+  private readonly hudEvents: HudEvent[] = [];
   private godMode = false;
   private metrics: SceneMetrics = { fps: CONFIG.rendering.targetFps, drawCalls: 0 };
 
   constructor(seed: number) {
+    this.cosmeticRng = new SeededRng(seed ^ 0x5f356495);
+    this.audio.setSeed(seed);
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'game-canvas';
     this.canvas.setAttribute('aria-label', 'Stahlbunker first-person viewport');
@@ -143,6 +174,8 @@ export class PreludeScene {
     this.camera.far = CONFIG.rendering.cameraFarM;
     this.camera.updateProjectionMatrix();
     this.sendAction = options.sendAction;
+    this.cosmeticRng = new SeededRng(options.seed ^ 0x5f356495);
+    this.audio.setSeed(options.seed);
     if (options.mode === 'solo') {
       this.simulation = new GameSimulation({ seed: options.seed, mode: 'solo', rosterSize: 1 });
       this.soloPlayer = {
@@ -151,6 +184,7 @@ export class PreludeScene {
         y: CONFIG.map.startPosition.y,
         z: CONFIG.map.startPosition.z,
         yaw: 0,
+        pitch: 0,
         hp: CONFIG.player.maxHp,
         maxHp: CONFIG.player.maxHp,
         points: CONFIG.points.starting,
@@ -159,6 +193,7 @@ export class PreludeScene {
         invulnerableUntilMs: 0,
       };
       this.networkSimulation = null;
+      this.simulation.getCombatState(this.soloPlayer.id);
     } else {
       this.simulation = null;
       this.soloPlayer = null;
@@ -171,8 +206,12 @@ export class PreludeScene {
       sendInput: options.sendInput,
       onMelee: this.handleMelee,
       onInteractChange: this.handleInteractChange,
+      onFire: this.handleFire,
+      onReload: this.handleReload,
+      onSwitchWeapon: this.handleSwitchWeapon,
     });
-    this.viewmodel = this.buildViewmodel();
+    this.viewmodel = this.buildViewmodel('melder');
+    this.viewmodelWeaponId = 'melder';
     this.camera.add(this.viewmodel);
     this.gameplayElapsed = 0;
     this.fixedAccumulator = 0;
@@ -187,6 +226,16 @@ export class PreludeScene {
     this.networkSimulation = view;
     if (this.gameMode !== 'coop') return;
     this.refreshSimulationVisuals();
+  }
+
+  applyNetworkFeedback(feedback: NetworkFeedback): void {
+    if (feedback.kind === 'combat') {
+      if (feedback.hit) this.recordHit(feedback.headshot === true, feedback.killed);
+      if (feedback.points !== 0) this.recordPoints(feedback.points, feedback.source === 'melee' ? 'melee kill' : feedback.headshot ? 'headshot' : 'bullet hit');
+    }
+    if (feedback.kind === 'points') this.recordPoints(feedback.amount, feedback.reason);
+    if (feedback.kind === 'damage') this.recordDamage(feedback.amount, feedback.enemyId);
+    if (feedback.kind === 'reload' && !feedback.accepted) this.reloadAnimationRemainingMs = 0;
   }
 
   updateRemotePlayers(poses: readonly RemotePlayerPose[]): void {
@@ -239,6 +288,26 @@ export class PreludeScene {
       this.soloPlayer.hp = this.soloPlayer.maxHp;
       return this.godMode;
     }
+    if (name === 'jager') {
+      this.simulation.grantWeapon(this.soloPlayer.id, 'jaeger');
+      this.ensureViewmodelWeapon('jaeger');
+      return true;
+    }
+    if (name === 'target') {
+      const enemy = this.simulation.forceSpawn([this.soloPlayer])
+        ?? [...this.simulation.enemies.values()]
+          .filter((candidate) => candidate.state !== 'dead')
+          .sort((left, right) => left.hp - right.hp || left.id - right.id)[0]
+        ?? null;
+      if (enemy === null) return false;
+      enemy.x = this.soloPlayer.x - Math.sin(this.soloPlayer.yaw) * CONFIG.debug.aimTargetDistanceM;
+      enemy.y = this.soloPlayer.y;
+      enemy.z = this.soloPlayer.z - Math.cos(this.soloPlayer.yaw) * CONFIG.debug.aimTargetDistanceM;
+      enemy.state = 'chase';
+      enemy.stateTimeMs = 0;
+      enemy.spawnProgress = 1;
+      return true;
+    }
     return false;
   }
 
@@ -246,8 +315,13 @@ export class PreludeScene {
     return this.controller?.getReadout() ?? null;
   }
 
+  drainHudEvents(): HudEvent[] {
+    return this.hudEvents.splice(0, this.hudEvents.length);
+  }
+
   getSimulationReadout(): SceneSimulationReadout | null {
     if (this.gameMode === 'solo' && this.simulation !== null && this.soloPlayer !== null) {
+      const combat = this.simulation.getCombatState(this.soloPlayer.id);
       return {
         round: this.simulation.round,
         elapsedMs: this.simulation.elapsedMs,
@@ -258,6 +332,11 @@ export class PreludeScene {
         hp: this.soloPlayer.hp,
         maxHp: this.soloPlayer.maxHp,
         points: this.soloPlayer.points,
+        weapons: combat.weapons,
+        activeWeaponIndex: combat.activeWeaponIndex,
+        reloading: combat.reloadingWeaponIndex >= 0,
+        reloadRemainingMs: combat.reloadingWeaponIndex >= 0 ? Math.max(0, combat.reloadFinishAtMs - this.simulation.elapsedMs) : 0,
+        stats: combatStats(combat),
         barriers: [...this.simulation.barriers.values()],
         enemies: [...this.simulation.enemies.values()].map(toEnemyVisual),
       };
@@ -266,7 +345,7 @@ export class PreludeScene {
     if (this.gameMode === 'coop' && network !== null) {
       return {
         round: network.round,
-        elapsedMs: 0,
+        elapsedMs: network.elapsedMs,
         spawned: network.spawned,
         queued: network.queued,
         alive: network.alive,
@@ -274,6 +353,11 @@ export class PreludeScene {
         hp: network.localHp,
         maxHp: network.localMaxHp,
         points: network.localPoints,
+        weapons: network.localWeapons,
+        activeWeaponIndex: network.localActiveWeaponIndex,
+        reloading: network.localReloading,
+        reloadRemainingMs: network.localReloadRemainingMs,
+        stats: network.localStats,
         barriers: network.barriers,
         enemies: network.enemies.map(toEnemyVisual),
       };
@@ -307,6 +391,7 @@ export class PreludeScene {
     this.controller?.dispose();
     this.enemyRenderer?.dispose();
     this.bunkerMap?.dispose();
+    this.audio.dispose();
     this.timer.dispose();
     this.renderer.dispose();
   }
@@ -404,26 +489,61 @@ export class PreludeScene {
     return new THREE.Points(geometry, new THREE.PointsMaterial({ size: 0.045, transparent: true, opacity: 0.4, vertexColors: true, depthWrite: false }));
   }
 
-  private buildViewmodel(): THREE.Group {
+  private buildViewmodel(weaponId: WeaponId): THREE.Group {
     const group = new THREE.Group();
-    group.name = 'melder-viewmodel-foundation';
+    group.name = `${weaponId}-viewmodel`;
     const metal = new THREE.MeshStandardMaterial({ color: 0x242827, roughness: 0.46, metalness: 0.74 });
     const darkMetal = new THREE.MeshStandardMaterial({ color: 0x111413, roughness: 0.58, metalness: 0.66 });
     const grip = new THREE.MeshStandardMaterial({ color: 0x4a3728, roughness: 0.82 });
-    const slide = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.1, 0.47), metal);
-    slide.position.z = -0.09;
-    group.add(slide);
-    const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.32, 12), darkMetal);
-    barrel.rotation.x = Math.PI / 2;
-    barrel.position.set(0, 0.005, -0.34);
-    group.add(barrel);
-    const handle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 0.13), grip);
-    handle.position.set(0, -0.14, 0.08);
-    handle.rotation.x = -0.2;
-    group.add(handle);
-    const sight = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.035, 0.035), darkMetal);
-    sight.position.set(0, 0.067, -0.25);
-    group.add(sight);
+    if (weaponId === 'jaeger') {
+      const stock = new THREE.Mesh(new THREE.BoxGeometry(0.18, 0.16, 0.72), grip);
+      stock.position.set(0, -0.06, 0.05);
+      stock.rotation.x = -0.04;
+      group.add(stock);
+      const receiver = new THREE.Mesh(new THREE.BoxGeometry(0.14, 0.13, 0.34), metal);
+      receiver.position.set(0, 0.025, -0.35);
+      group.add(receiver);
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.022, 0.028, 0.72, 12), darkMetal);
+      barrel.rotation.x = Math.PI / 2;
+      barrel.position.set(0, 0.04, -0.83);
+      group.add(barrel);
+      const bolt = new THREE.Mesh(new THREE.CylinderGeometry(0.018, 0.018, 0.18, 10), metal);
+      bolt.rotation.z = Math.PI / 2;
+      bolt.position.set(0.14, 0.095, -0.29);
+      group.add(bolt);
+      const rearSight = new THREE.Mesh(new THREE.BoxGeometry(0.08, 0.055, 0.035), darkMetal);
+      rearSight.position.set(0, 0.12, -0.25);
+      group.add(rearSight);
+      const frontSight = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.06, 0.025), darkMetal);
+      frontSight.position.set(0, 0.11, -1.12);
+      group.add(frontSight);
+      group.scale.setScalar(CONFIG.rendering.viewmodel.jagerScale);
+    } else {
+      const slide = new THREE.Mesh(new THREE.BoxGeometry(0.11, 0.1, 0.47), metal);
+      slide.position.z = -0.09;
+      group.add(slide);
+      const barrel = new THREE.Mesh(new THREE.CylinderGeometry(0.025, 0.03, 0.32, 12), darkMetal);
+      barrel.rotation.x = Math.PI / 2;
+      barrel.position.set(0, 0.005, -0.34);
+      group.add(barrel);
+      const handle = new THREE.Mesh(new THREE.BoxGeometry(0.1, 0.24, 0.13), grip);
+      handle.position.set(0, -0.14, 0.08);
+      handle.rotation.x = -0.2;
+      group.add(handle);
+      const sight = new THREE.Mesh(new THREE.BoxGeometry(0.018, 0.035, 0.035), darkMetal);
+      sight.position.set(0, 0.067, -0.25);
+      group.add(sight);
+    }
+    const sleeve = new THREE.MeshStandardMaterial({ color: 0x343b36, roughness: 0.94 });
+    const leftArm = new THREE.Mesh(new THREE.CapsuleGeometry(0.055, 0.34, 4, 8), sleeve);
+    leftArm.rotation.x = Math.PI / 2.7;
+    leftArm.rotation.z = -0.28;
+    leftArm.position.set(-0.16, -0.25, 0.13);
+    group.add(leftArm);
+    const rightArm = leftArm.clone();
+    rightArm.position.x = 0.18;
+    rightArm.rotation.z = 0.32;
+    group.add(rightArm);
     group.traverse((object) => {
       if (object instanceof THREE.Mesh) {
         object.castShadow = false;
@@ -432,7 +552,23 @@ export class PreludeScene {
     });
     const hip = CONFIG.rendering.viewmodel.hip;
     group.position.set(hip[0], hip[1], hip[2]);
+    const muzzleOffset = CONFIG.rendering.viewmodel.muzzleOffset;
+    this.muzzleLight = new THREE.PointLight(0xffb15a, 0, CONFIG.rendering.muzzleLightDistanceM, 2);
+    this.muzzleLight.position.set(muzzleOffset[0], muzzleOffset[1], weaponId === 'jaeger' ? muzzleOffset[2] * CONFIG.rendering.viewmodel.jagerScale : muzzleOffset[2]);
+    group.add(this.muzzleLight);
     return group;
+  }
+
+  private ensureViewmodelWeapon(weaponId: WeaponId): void {
+    if (weaponId === this.viewmodelWeaponId && this.viewmodel !== null) return;
+    const prior = this.viewmodel;
+    if (prior !== null) {
+      this.camera.remove(prior);
+      this.disposeObject(prior);
+    }
+    this.viewmodel = this.buildViewmodel(weaponId);
+    this.viewmodelWeaponId = weaponId;
+    this.camera.add(this.viewmodel);
   }
 
   private createRemoteVisual(): RemoteVisual {
@@ -464,7 +600,9 @@ export class PreludeScene {
         this.soloPlayer.y = readout.y;
         this.soloPlayer.z = readout.z;
         this.soloPlayer.yaw = readout.yaw;
+        this.soloPlayer.pitch = readout.pitch;
         this.simulation.update(1000 / CONFIG.simulation.hz, [this.soloPlayer]);
+        this.processSoloEvents(this.simulation.drainEvents());
         if (this.godMode) {
           this.soloPlayer.hp = this.soloPlayer.maxHp;
           this.soloPlayer.downed = false;
@@ -476,6 +614,10 @@ export class PreludeScene {
     controller.applyCamera(this.camera);
     this.gameplayElapsed += delta;
     this.meleeAnimationRemainingMs = Math.max(0, this.meleeAnimationRemainingMs - delta * 1000);
+    this.reloadAnimationRemainingMs = Math.max(0, this.reloadAnimationRemainingMs - delta * 1000);
+    this.muzzleRemainingMs = Math.max(0, this.muzzleRemainingMs - delta * 1000);
+    this.viewmodelRecoilM = THREE.MathUtils.lerp(this.viewmodelRecoilM, 0, Math.min(1, delta * 1000 / CONFIG.controller.recoilRecoveryMs));
+    if (this.muzzleLight !== null) this.muzzleLight.intensity = this.muzzleRemainingMs > 0 ? CONFIG.rendering.muzzleLightIntensity : 0;
     this.updateViewmodel(controller.getReadout(), delta);
     this.refreshSimulationVisuals();
     const interpolationAlpha = Math.min(1, delta / (CONFIG.coop.interpolationMs / 1000));
@@ -486,6 +628,9 @@ export class PreludeScene {
   }
 
   private updateViewmodel(readout: ControllerReadout, delta: number): void {
+    const simulation = this.getSimulationReadout();
+    const weapon = simulation?.weapons[simulation.activeWeaponIndex];
+    if (weapon !== undefined) this.ensureViewmodelWeapon(weapon.id);
     const viewmodel = this.viewmodel;
     if (viewmodel === null) return;
     const speed = Math.hypot(readout.vx, readout.vz);
@@ -499,7 +644,7 @@ export class PreludeScene {
     const positionAlpha = 1 - Math.exp(-CONFIG.rendering.viewmodel.positionLerpPerSecond * delta);
     viewmodel.position.x = THREE.MathUtils.lerp(viewmodel.position.x, target[0], positionAlpha);
     viewmodel.position.y = THREE.MathUtils.lerp(viewmodel.position.y, target[1] + bob, positionAlpha);
-    viewmodel.position.z = THREE.MathUtils.lerp(viewmodel.position.z, target[2], positionAlpha);
+    viewmodel.position.z = THREE.MathUtils.lerp(viewmodel.position.z, target[2] + this.viewmodelRecoilM, positionAlpha);
     const targetRoll = readout.sprinting ? CONFIG.rendering.viewmodel.sprintRollRad : Math.sin(this.gameplayElapsed * CONFIG.controller.bobFrequency * 0.5) * 0.018 * moveRatio;
     const rotationAlpha = 1 - Math.exp(-CONFIG.rendering.viewmodel.rotationLerpPerSecond * delta);
     viewmodel.rotation.z = THREE.MathUtils.lerp(viewmodel.rotation.z, targetRoll, rotationAlpha);
@@ -513,6 +658,11 @@ export class PreludeScene {
       meleeArc * CONFIG.rendering.viewmodel.meleeYawRad,
       rotationAlpha,
     );
+    const reloadDuration = weapon === undefined ? 1 : CONFIG.weapons[weapon.id].reloadMs;
+    const reloadProgress = this.reloadAnimationRemainingMs > 0 ? 1 - this.reloadAnimationRemainingMs / reloadDuration : 0;
+    const reloadArc = this.reloadAnimationRemainingMs > 0 ? Math.sin(reloadProgress * Math.PI) : 0;
+    viewmodel.position.y -= reloadArc * CONFIG.rendering.viewmodel.reloadDropM;
+    viewmodel.rotation.z += reloadArc * CONFIG.rendering.viewmodel.reloadRollRad;
   }
 
   private refreshSimulationVisuals(): void {
@@ -520,6 +670,119 @@ export class PreludeScene {
     if (readout === null) return;
     this.enemyRenderer?.update(readout.enemies);
     this.bunkerMap?.updateBarriers(readout.barriers);
+  }
+
+  private readonly handleFire = (): void => {
+    const controllerReadout = this.controller?.getReadout();
+    const simulationReadout = this.getSimulationReadout();
+    if (controllerReadout === undefined || controllerReadout === null || simulationReadout === null) return;
+    const weapon = simulationReadout.weapons[simulationReadout.activeWeaponIndex];
+    if (weapon === undefined) return;
+    if (simulationReadout.reloading || weapon.magazine <= 0) {
+      this.audio.playEmpty();
+      return;
+    }
+
+    if (this.gameMode === 'coop') {
+      const nowMs = this.gameplayElapsed * 1000;
+      if (nowMs < this.nextCosmeticFireAtMs) return;
+      this.nextCosmeticFireAtMs = nowMs + 60000 / CONFIG.weapons[weapon.id].rpm;
+      this.sendAction?.({ type: 'fire', ads: controllerReadout.ads });
+      this.playLocalShot(weapon.id);
+      return;
+    }
+    if (this.simulation === null || this.soloPlayer === null) return;
+    this.syncSoloPose(controllerReadout);
+    const result = this.simulation.fire(this.soloPlayer, controllerReadout.ads);
+    if (!result.accepted) {
+      if (result.reason === 'empty') this.audio.playEmpty();
+      return;
+    }
+    this.playLocalShot(result.weaponId);
+    this.processFireResult(result);
+  };
+
+  private readonly handleReload = (): void => {
+    const readout = this.getSimulationReadout();
+    if (readout === null) return;
+    const weapon = readout.weapons[readout.activeWeaponIndex];
+    if (weapon === undefined || readout.reloading || weapon.reserve <= 0 || weapon.magazine >= CONFIG.weapons[weapon.id].magazine) return;
+    if (this.gameMode === 'coop') {
+      this.sendAction?.({ type: 'reload' });
+    } else if (this.simulation !== null && this.soloPlayer !== null) {
+      const result = this.simulation.requestReload(this.soloPlayer.id);
+      if (!result.accepted) return;
+    }
+    this.reloadAnimationRemainingMs = CONFIG.weapons[weapon.id].reloadMs;
+    this.nextCosmeticFireAtMs = 0;
+    this.audio.playReload(weapon.id);
+  };
+
+  private readonly handleSwitchWeapon = (index: number): void => {
+    const readout = this.getSimulationReadout();
+    if (readout === null || index < 0 || index >= readout.weapons.length || index === readout.activeWeaponIndex) return;
+    if (this.gameMode === 'coop') this.sendAction?.({ type: 'switch', index });
+    else if (this.soloPlayer !== null && !this.simulation?.switchWeapon(this.soloPlayer.id, index)) return;
+    this.reloadAnimationRemainingMs = 0;
+    this.ensureViewmodelWeapon(readout.weapons[index]!.id);
+  };
+
+  private playLocalShot(weaponId: WeaponId): void {
+    const definition = CONFIG.weapons[weaponId];
+    const horizontal = (this.cosmeticRng.next() * 2 - 1) * definition.recoilHorizontal;
+    this.controller?.applyRecoil(definition.recoilVertical, horizontal);
+    this.viewmodelRecoilM = CONFIG.rendering.viewmodel.recoilPositionM;
+    this.muzzleRemainingMs = CONFIG.rendering.muzzleLightMs;
+    this.audio.playShot(weaponId);
+    this.pushHudEvent({ type: 'shot' });
+  }
+
+  private processFireResult(result: FireResult): void {
+    if (result.hit) this.recordHit(result.headshot, result.killed);
+    if (result.points !== 0) this.recordPoints(result.points, result.headshot ? 'headshot' : result.killed ? 'body kill' : 'bullet hit');
+  }
+
+  private processSoloEvents(events: ReturnType<GameSimulation['drainEvents']>): void {
+    for (const event of events) {
+      if (event.type === 'boardRepaired') this.recordPoints(event.points, 'barrier repair');
+      if (event.type === 'playerDamaged') this.recordDamage(event.damage, event.enemyId);
+    }
+  }
+
+  private recordHit(headshot: boolean, killed: boolean): void {
+    this.audio.playHitmarker();
+    this.pushHudEvent({ type: 'hit', headshot, killed });
+  }
+
+  private recordPoints(amount: number, reason: string): void {
+    this.pushHudEvent({ type: 'points', amount, reason });
+    if (import.meta.env.DEV) console.debug(`[points] local ${amount >= 0 ? '+' : ''}${amount} ${reason}`);
+  }
+
+  private recordDamage(amount: number, enemyId: number): void {
+    const player = this.controller?.getReadout();
+    const enemy = this.getSimulationReadout()?.enemies.find((candidate) => candidate.id === enemyId);
+    let directionDeg = 0;
+    if (player !== undefined && player !== null && enemy !== undefined) {
+      const targetYaw = Math.atan2(-(enemy.x - player.x), -(enemy.z - player.z));
+      const relative = Math.atan2(Math.sin(targetYaw - player.yaw), Math.cos(targetYaw - player.yaw));
+      directionDeg = THREE.MathUtils.radToDeg(relative);
+    }
+    this.pushHudEvent({ type: 'damage', amount, directionDeg });
+  }
+
+  private pushHudEvent(event: HudEventInput): void {
+    this.hudEventSequence += 1;
+    this.hudEvents.push({ id: this.hudEventSequence, ...event } as HudEvent);
+  }
+
+  private syncSoloPose(readout: ControllerReadout): void {
+    if (this.soloPlayer === null) return;
+    this.soloPlayer.x = readout.x;
+    this.soloPlayer.y = readout.y;
+    this.soloPlayer.z = readout.z;
+    this.soloPlayer.yaw = readout.yaw;
+    this.soloPlayer.pitch = readout.pitch;
   }
 
   private readonly handleMelee = (): void => {
@@ -535,8 +798,11 @@ export class PreludeScene {
       this.soloPlayer.y = readout.y;
       this.soloPlayer.z = readout.z;
       this.soloPlayer.yaw = readout.yaw;
+      this.soloPlayer.pitch = readout.pitch;
     }
-    this.simulation.melee(this.soloPlayer);
+    const result = this.simulation.melee(this.soloPlayer);
+    if (result.hit) this.recordHit(false, result.killed);
+    if (result.points !== 0) this.recordPoints(result.points, 'melee kill');
   };
 
   private readonly handleInteractChange = (held: boolean): void => {
@@ -632,5 +898,15 @@ function toEnemyVisual(enemy: {
     speed: enemy.speed,
     barrierId: enemy.barrierId,
     targetPlayerId: enemy.targetPlayerId,
+  };
+}
+
+function combatStats(state: CombatPlayerState): SceneSimulationReadout['stats'] {
+  return {
+    shots: state.shots,
+    hits: state.hits,
+    kills: state.kills,
+    headshots: state.headshots,
+    pointsEarned: state.pointsEarned,
   };
 }

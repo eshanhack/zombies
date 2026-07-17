@@ -1,5 +1,5 @@
 import { Client, type Room } from '@colyseus/sdk';
-import { CONFIG } from '../config.js';
+import { CONFIG, type WeaponId } from '../config.js';
 import type { MovementInput } from '../shared/movement.js';
 import type { AuthoritativePlayerState } from '../game/FirstPersonController.js';
 import type { RemotePlayerPose } from '../game/PreludeScene.js';
@@ -24,6 +24,15 @@ interface WirePlayer {
   hp: number;
   maxHp: number;
   points: number;
+  weapons: { forEach(callback: (weapon: { id: string; magazine: number; reserve: number; upgraded: boolean }, index: number) => void): void };
+  activeWeaponIndex: number;
+  reloading: boolean;
+  reloadRemainingMs: number;
+  shots: number;
+  hits: number;
+  kills: number;
+  headshots: number;
+  pointsEarned: number;
 }
 
 interface WireState {
@@ -36,6 +45,7 @@ interface WireState {
   spawned: number;
   queued: number;
   alive: number;
+  simulationTimeMs: number;
   players: {
     forEach(callback: (player: WirePlayer, key: string) => void): void;
   };
@@ -70,6 +80,7 @@ export interface NetworkEnemyView {
 
 export interface NetworkGameView {
   round: number;
+  elapsedMs: number;
   spawned: number;
   queued: number;
   alive: number;
@@ -79,7 +90,32 @@ export interface NetworkGameView {
   localHp: number;
   localMaxHp: number;
   localPoints: number;
+  localWeapons: NetworkWeaponView[];
+  localActiveWeaponIndex: number;
+  localReloading: boolean;
+  localReloadRemainingMs: number;
+  localStats: { shots: number; hits: number; kills: number; headshots: number; pointsEarned: number };
 }
+
+export interface NetworkWeaponView {
+  id: WeaponId;
+  magazine: number;
+  reserve: number;
+  upgraded: boolean;
+}
+
+export type ClientAction =
+  | { type: 'melee' }
+  | { type: 'repair'; held: boolean }
+  | { type: 'fire'; ads: boolean }
+  | { type: 'reload' }
+  | { type: 'switch'; index: number };
+
+export type NetworkFeedback =
+  | { kind: 'combat'; source: 'fire' | 'melee'; accepted: boolean; hit: boolean; killed: boolean; headshot?: boolean; points: number; damage: number; enemyId: number | null }
+  | { kind: 'points'; amount: number; reason: string }
+  | { kind: 'damage'; amount: number; enemyId: number }
+  | { kind: 'reload'; accepted: boolean; weaponId: WeaponId; finishAtMs: number };
 
 export interface LobbyPlayerView {
   id: string;
@@ -103,6 +139,7 @@ export interface LobbyView {
 type LobbyListener = (view: LobbyView) => void;
 type MovementListener = (local: AuthoritativePlayerState | null, players: readonly RemotePlayerPose[]) => void;
 type SimulationListener = (view: NetworkGameView) => void;
+type FeedbackListener = (feedback: NetworkFeedback) => void;
 
 export class CoopClient {
   private readonly client: Client;
@@ -110,6 +147,7 @@ export class CoopClient {
   private listener: LobbyListener = () => undefined;
   private movementListener: MovementListener = () => undefined;
   private simulationListener: SimulationListener = () => undefined;
+  private feedbackListener: FeedbackListener = () => undefined;
 
   constructor(endpoint = import.meta.env.VITE_GAME_SERVER ?? CONFIG.coop.localServerUrl) {
     this.client = new Client(endpoint);
@@ -125,6 +163,10 @@ export class CoopClient {
 
   onSimulation(listener: SimulationListener): void {
     this.simulationListener = listener;
+  }
+
+  onFeedback(listener: FeedbackListener): void {
+    this.feedbackListener = listener;
   }
 
   async create(name: string): Promise<void> {
@@ -147,7 +189,7 @@ export class CoopClient {
     this.room?.send('input', input);
   }
 
-  sendAction(action: { type: 'melee' } | { type: 'repair'; held: boolean }): void {
+  sendAction(action: ClientAction): void {
     this.room?.send('action', action);
   }
 
@@ -162,6 +204,18 @@ export class CoopClient {
     const room = await roomPromise;
     this.room = room;
     room.onMessage('runStarted', () => undefined);
+    room.onMessage('combatFeedback', (message: Omit<Extract<NetworkFeedback, { kind: 'combat' }>, 'kind'>) => {
+      this.feedbackListener({ kind: 'combat', ...message });
+    });
+    room.onMessage('pointTransaction', (message: { amount: number; reason: string }) => {
+      this.feedbackListener({ kind: 'points', amount: message.amount, reason: message.reason });
+    });
+    room.onMessage('damageFeedback', (message: { amount: number; enemyId: number }) => {
+      this.feedbackListener({ kind: 'damage', amount: message.amount, enemyId: message.enemyId });
+    });
+    room.onMessage('reloadFeedback', (message: { accepted: boolean; weaponId: string; finishAtMs: number }) => {
+      this.feedbackListener({ kind: 'reload', accepted: message.accepted, weaponId: normalizeWeaponId(message.weaponId), finishAtMs: message.finishAtMs });
+    });
     room.onStateChange(() => this.publish());
     room.onLeave(() => {
       if (this.room === room) this.room = null;
@@ -188,6 +242,11 @@ export class CoopClient {
     let localHp: number = CONFIG.player.maxHp;
     let localMaxHp: number = CONFIG.player.maxHp;
     let localPoints: number = CONFIG.points.starting;
+    let localWeapons: NetworkWeaponView[] = [{ id: 'melder', magazine: CONFIG.weapons.melder.magazine, reserve: CONFIG.weapons.melder.reserve, upgraded: false }];
+    let localActiveWeaponIndex = 0;
+    let localReloading = false;
+    let localReloadRemainingMs = 0;
+    let localStats = { shots: 0, hits: 0, kills: 0, headshots: 0, pointsEarned: 0 };
     state.players.forEach((player) => {
       players.push({
         id: player.id,
@@ -212,6 +271,17 @@ export class CoopClient {
         localHp = player.hp;
         localMaxHp = player.maxHp;
         localPoints = player.points;
+        localWeapons = [];
+        player.weapons?.forEach((weapon) => localWeapons.push({
+          id: normalizeWeaponId(weapon.id),
+          magazine: weapon.magazine,
+          reserve: weapon.reserve,
+          upgraded: weapon.upgraded,
+        }));
+        localActiveWeaponIndex = player.activeWeaponIndex;
+        localReloading = player.reloading;
+        localReloadRemainingMs = player.reloadRemainingMs;
+        localStats = { shots: player.shots, hits: player.hits, kills: player.kills, headshots: player.headshots, pointsEarned: player.pointsEarned };
         local = {
           x: player.x,
           y: player.y,
@@ -264,6 +334,7 @@ export class CoopClient {
     }));
     this.simulationListener({
       round: state.round,
+      elapsedMs: state.simulationTimeMs,
       spawned: state.spawned,
       queued: state.queued,
       alive: state.alive,
@@ -273,6 +344,15 @@ export class CoopClient {
       localHp,
       localMaxHp,
       localPoints,
+      localWeapons,
+      localActiveWeaponIndex,
+      localReloading,
+      localReloadRemainingMs,
+      localStats,
     });
   }
+}
+
+function normalizeWeaponId(value: string): WeaponId {
+  return Object.prototype.hasOwnProperty.call(CONFIG.weapons, value) ? value as WeaponId : 'melder';
 }
