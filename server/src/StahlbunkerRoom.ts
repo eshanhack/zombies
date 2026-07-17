@@ -147,6 +147,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       if (action.type === 'melee') {
         const result = simulation.melee(player);
         client.send('combatFeedback', { source: 'melee', ...result });
+        this.broadcast('gameEvent', { type: 'meleeSwung', playerId: player.id });
         if (result.points > 0) this.logPointTransaction(player.id, result.points, 'melee kill');
       }
       if (action.type === 'repair' || action.type === 'interact') {
@@ -156,6 +157,15 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
       if (action.type === 'fire') {
         const result = simulation.fire(player, action.ads === true);
         client.send('combatFeedback', { source: 'fire', ...result });
+        if (result.accepted) {
+          this.broadcast('gameEvent', {
+            type: 'weaponFired',
+            playerId: player.id,
+            weaponId: result.weaponId,
+            impact: result.impact,
+            hit: result.hit,
+          });
+        }
         if (result.accepted && (result.weaponId === 'blitzwerfer' || result.weaponId === 'sonnenpistole')) {
           this.broadcast('gameEvent', {
             type: 'wonderFired',
@@ -167,7 +177,11 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         }
         if (result.points > 0) this.logPointTransaction(player.id, result.points, result.headshot ? 'headshot bullet' : 'body bullet');
       }
-      if (action.type === 'reload') client.send('reloadFeedback', simulation.requestReload(player.id));
+      if (action.type === 'reload') {
+        const result = simulation.requestReload(player.id);
+        client.send('reloadFeedback', result);
+        if (result.accepted) this.broadcast('gameEvent', { type: 'weaponReloaded', playerId: player.id, weaponId: result.weaponId });
+      }
       if (action.type === 'switch' && Number.isInteger(action.index)) simulation.switchWeapon(player.id, action.index ?? -1);
       if (action.type === 'grenade') simulation.throwGrenade(player, Number.isFinite(action.cookedMs) ? action.cookedMs ?? 0 : 0);
       this.syncSimulation(simulation);
@@ -432,11 +446,7 @@ export class StahlbunkerRoom extends Room<{ state: BunkerState }> {
         this.clientBySessionId(event.playerId)?.send('pointTransaction', { amount: event.amount, reason: event.reason });
         this.logPointTransaction(event.playerId, event.amount, event.reason);
       }
-      if (event.type === 'powerActivated' || event.type === 'perkPurchaseStarted' || event.type === 'perkGranted'
-        || event.type === 'powerupSpawned' || event.type === 'powerupCollected' || event.type === 'playerDowned'
-        || event.type === 'playerRevived' || event.type === 'playerBledOut' || event.type === 'playerReturned'
-        || event.type === 'forgeStarted' || event.type === 'forgeCompleted' || event.type === 'forgeCancelled'
-        || event.type === 'gameOver') this.broadcast('gameEvent', event);
+      this.broadcast('gameEvent', event);
     }
   }
 

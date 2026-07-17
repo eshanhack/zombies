@@ -33,11 +33,13 @@ host.onMessage('pointTransaction', () => undefined);
 host.onMessage('damageFeedback', () => undefined);
 host.onMessage('gateAck', () => undefined);
 host.onMessage('runStarted', () => undefined);
+host.onMessage('gameEvent', () => undefined);
 guest.onMessage('combatFeedback', () => undefined);
 guest.onMessage('pointTransaction', () => undefined);
 guest.onMessage('damageFeedback', () => undefined);
 guest.onMessage('gateAck', () => undefined);
 guest.onMessage('runStarted', () => undefined);
+guest.onMessage('gameEvent', () => undefined);
 
 try {
   await waitFor(() => player(host, guest.sessionId) !== undefined, 3000);

@@ -11,6 +11,7 @@ export interface AppShellHandlers {
   onReady(ready: boolean): void;
   onStart(): void;
   onLeave(): Promise<void>;
+  onSetting(setting: 'fov' | 'sensitivity' | 'volume', value: number): void;
 }
 
 export class AppShell {
@@ -79,7 +80,7 @@ export class AppShell {
     this.overlay.id = 'debug-overlay';
     this.overlay.className = 'debug-overlay is-hidden';
     this.overlay.innerHTML = `
-      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P6 FORGE / WONDER SYSTEMS</span></header>
+      <header><b>F1 · SYSTEM DIAGNOSTICS</b><span>P7 PRODUCTION AUDIO</span></header>
       <dl>
         <div><dt>Seed lock</dt><dd data-debug="seed">${seed}</dd></div>
         <div><dt>Renderer</dt><dd data-debug="metrics">sampling…</dd></div>
@@ -94,6 +95,8 @@ export class AppShell {
         <div><dt>Doors / crate / grenades</dt><dd data-debug="economy">0 · closed · 4</dd></div>
         <div><dt>Power / perks / effects</dt><dd data-debug="systems">OFF · 0 · none</dd></div>
         <div><dt>Round species</dt><dd data-debug="species">zombies</dd></div>
+        <div><dt>Audio graph</dt><dd data-debug="audio">48 kHz · uninitialized</dd></div>
+        <div><dt>Audio localization</dt><dd data-debug="localization">not run</dd></div>
         <div><dt>Console errors</dt><dd data-debug="errors">0</dd></div>
         <div><dt>Controller</dt><dd data-debug="controller">menu</dd></div>
       </dl>
@@ -118,6 +121,7 @@ export class AppShell {
         <button data-debug-action="pack">Spawn round-25 ten-pack</button>
         <button data-debug-action="fire">Fire active weapon</button>
         <button data-debug-action="forgeview">Stage Forge visual gate</button>
+        <button data-debug-action="audio">Run left/right breach cue</button>
       </div>
     `;
     this.metricValue = this.overlay.querySelector('[data-debug="metrics"]') as HTMLElement;
@@ -266,6 +270,13 @@ export class AppShell {
         }
         const species = this.overlay.querySelector<HTMLElement>('[data-debug="species"]');
         if (species !== null && combat !== null) species.textContent = `${combat.roundKind} · next wolves ${combat.nextWolfRound}`;
+        const audioDiagnostics = scene.getAudioDiagnostics();
+        const audioValue = this.overlay.querySelector<HTMLElement>('[data-debug="audio"]');
+        if (audioValue !== null) {
+          audioValue.textContent = `${Math.round(audioDiagnostics.sampleRateHz / 1000)} kHz · ${audioDiagnostics.state} · ${audioDiagnostics.activeVoices} voices · ${audioDiagnostics.estimatedHeadroomDb.toFixed(1)} dB · ${audioDiagnostics.lastCue}`;
+        }
+        const localization = this.overlay.querySelector<HTMLElement>('[data-debug="localization"]');
+        if (localization !== null) localization.textContent = audioDiagnostics.localizationGate;
         const errors = this.overlay.querySelector<HTMLElement>('[data-debug="errors"]');
         if (errors !== null) errors.textContent = String(window.__consoleErrors.length);
         this.pointsValue.textContent = String(combat?.points ?? snapshot.players[0]?.points ?? 0);
@@ -484,6 +495,8 @@ export class AppShell {
         if (input.dataset.setting === 'fov') output.value = `${input.value}°`;
         if (input.dataset.setting === 'sensitivity') output.value = Number(input.value).toFixed(2);
         if (input.dataset.setting === 'volume') output.value = `${Math.round(Number(input.value) * 100)}%`;
+        const setting = input.dataset.setting;
+        if (setting === 'fov' || setting === 'sensitivity' || setting === 'volume') this.handlers.onSetting(setting, Number(input.value));
       });
     });
   }

@@ -174,6 +174,9 @@ const shell = new AppShell(seed, scene, {
     activeMode = 'solo';
     activePhase = 'menu';
   },
+  onSetting(setting, value) {
+    if (setting === 'volume') scene.setMasterVolume(value);
+  },
 }, coop.hasResumeToken());
 app.append(shell.root);
 shell.setSnapshotProvider(getSnapshot);

@@ -164,12 +164,12 @@ export interface MeleeResult {
 }
 
 export type SimulationEvent =
-  | { type: 'enemySpawned'; enemyId: number; barrierId: string }
+  | { type: 'enemySpawned'; enemyId: number; barrierId: string; kind: SimEnemyKind; x: number; y: number; z: number }
   | { type: 'boardTorn'; barrierId: string; boards: number }
   | { type: 'boardRepaired'; barrierId: string; boards: number; playerId: string; points: number }
   | { type: 'vaultStarted'; enemyId: number; barrierId: string }
-  | { type: 'playerDamaged'; playerId: string; enemyId: number; damage: number }
-  | { type: 'enemyKilled'; enemyId: number; playerId?: string; method: 'melee' | 'explosive' | 'bullet' | 'debug' }
+  | { type: 'playerDamaged'; playerId: string; enemyId: number; damage: number; enemyKind: SimEnemyKind; x: number; y: number; z: number }
+  | { type: 'enemyKilled'; enemyId: number; playerId?: string; method: 'melee' | 'explosive' | 'bullet' | 'debug'; kind: SimEnemyKind; x: number; y: number; z: number }
   | { type: 'pointTransaction'; playerId: string; amount: number; reason: string }
   | { type: 'doorOpened'; doorId: string; playerId: string }
   | { type: 'weaponPurchased'; wallBuyId: string; playerId: string; weaponId: WeaponId; cost: number }
@@ -179,8 +179,8 @@ export type SimulationEvent =
   | { type: 'crateSettled'; locationId: string; playerId: string; weaponId: WeaponId }
   | { type: 'cratePuppe'; locationId: string; playerId: string; relocatedTo: string }
   | { type: 'crateCollected'; locationId: string; playerId: string; weaponId: WeaponId }
-  | { type: 'grenadeThrown'; grenadeId: number; playerId: string }
-  | { type: 'grenadeExploded'; grenadeId: number; playerId: string; kills: number }
+  | { type: 'grenadeThrown'; grenadeId: number; playerId: string; x: number; y: number; z: number }
+  | { type: 'grenadeExploded'; grenadeId: number; playerId: string; kills: number; x: number; y: number; z: number }
   | { type: 'powerActivated'; playerId: string }
   | { type: 'perkPurchaseStarted'; playerId: string; perkId: PerkId; cost: number }
   | { type: 'perkGranted'; playerId: string; perkId: PerkId }
@@ -188,8 +188,8 @@ export type SimulationEvent =
   | { type: 'forgeCompleted'; playerId: string; weaponId: WeaponId; magazine: number; reserve: number }
   | { type: 'forgeCancelled'; playerId: string; weaponId: WeaponId }
   | { type: 'playerSelfDamaged'; playerId: string; damage: number }
-  | { type: 'powerupSpawned'; powerupId: number; powerupType: PowerupId; guaranteed: boolean }
-  | { type: 'powerupCollected'; powerupId: number; powerupType: PowerupId; playerId: string }
+  | { type: 'powerupSpawned'; powerupId: number; powerupType: PowerupId; guaranteed: boolean; x: number; y: number; z: number }
+  | { type: 'powerupCollected'; powerupId: number; powerupType: PowerupId; playerId: string; x: number; y: number; z: number }
   | { type: 'playerDowned'; playerId: string; selfRevive: boolean }
   | { type: 'playerRevived'; playerId: string; reviverId?: string }
   | { type: 'playerBledOut'; playerId: string }
@@ -460,7 +460,7 @@ export class GameSimulation {
     };
     this.nextGrenadeId += 1;
     this.grenades.set(grenade.id, grenade);
-    this.events.push({ type: 'grenadeThrown', grenadeId: grenade.id, playerId: player.id });
+    this.events.push({ type: 'grenadeThrown', grenadeId: grenade.id, playerId: player.id, x: grenade.x, y: grenade.y, z: grenade.z });
     return grenade;
   }
 
@@ -1042,7 +1042,7 @@ export class GameSimulation {
     this.enemies.set(enemy.id, enemy);
     this.spawnedThisRound += 1;
     this.queued = Math.max(0, this.totalThisRound - this.spawnedThisRound);
-    this.events.push({ type: 'enemySpawned', enemyId: enemy.id, barrierId: enemy.barrierId });
+    this.events.push({ type: 'enemySpawned', enemyId: enemy.id, barrierId: enemy.barrierId, kind: enemy.kind, x: enemy.x, y: enemy.y, z: enemy.z });
     return enemy;
   }
 
@@ -1086,7 +1086,7 @@ export class GameSimulation {
     this.enemies.set(enemy.id, enemy);
     this.spawnedThisRound += 1;
     this.queued = Math.max(0, this.totalThisRound - this.spawnedThisRound);
-    this.events.push({ type: 'enemySpawned', enemyId: enemy.id, barrierId: enemy.barrierId });
+    this.events.push({ type: 'enemySpawned', enemyId: enemy.id, barrierId: enemy.barrierId, kind: enemy.kind, x: enemy.x, y: enemy.y, z: enemy.z });
     return enemy;
   }
 
@@ -1469,7 +1469,7 @@ export class GameSimulation {
       combat.kills += kills;
     }
     this.grenades.delete(grenade.id);
-    this.events.push({ type: 'grenadeExploded', grenadeId: grenade.id, playerId: grenade.ownerId, kills });
+    this.events.push({ type: 'grenadeExploded', grenadeId: grenade.id, playerId: grenade.ownerId, kills, x: grenade.x, y: grenade.y, z: grenade.z });
   }
 
   private spendPoints(player: SimPlayer, amount: number, reason: string): boolean {
@@ -1679,7 +1679,7 @@ export class GameSimulation {
       if (collector === undefined) continue;
       this.powerups.delete(powerup.id);
       this.applyPowerup(powerup.type, collector, players);
-      this.events.push({ type: 'powerupCollected', powerupId: powerup.id, powerupType: powerup.type, playerId: collector.id });
+      this.events.push({ type: 'powerupCollected', powerupId: powerup.id, powerupType: powerup.type, playerId: collector.id, x: powerup.x, y: powerup.y, z: powerup.z });
     }
   }
 
@@ -1716,7 +1716,7 @@ export class GameSimulation {
     };
     this.nextPowerupId += 1;
     this.powerups.set(powerup.id, powerup);
-    this.events.push({ type: 'powerupSpawned', powerupId: powerup.id, powerupType: type, guaranteed });
+    this.events.push({ type: 'powerupSpawned', powerupId: powerup.id, powerupType: type, guaranteed, x, y, z });
     return powerup;
   }
 
@@ -1866,7 +1866,7 @@ export class GameSimulation {
 
   private damagePlayer(enemy: SimEnemy, player: SimPlayer, amount: number = CONFIG.zombie.hitDamage): void {
     if (!this.damagePlayerAmount(player, amount)) return;
-    this.events.push({ type: 'playerDamaged', playerId: player.id, enemyId: enemy.id, damage: amount });
+    this.events.push({ type: 'playerDamaged', playerId: player.id, enemyId: enemy.id, damage: amount, enemyKind: enemy.kind, x: enemy.x, y: enemy.y, z: enemy.z });
   }
 
   private damagePlayerAmount(player: SimPlayer, amount: number): boolean {
@@ -1886,7 +1886,7 @@ export class GameSimulation {
   ): void {
     enemy.hp = 0;
     this.changeState(enemy, 'dead');
-    this.events.push({ type: 'enemyKilled', enemyId: enemy.id, playerId, method });
+    this.events.push({ type: 'enemyKilled', enemyId: enemy.id, playerId, method, kind: enemy.kind, x: enemy.x, y: enemy.y, z: enemy.z });
     if (allowDrop && method !== 'debug' && this.dropsThisRound < CONFIG.powerups.maxDropsPerRound
       && this.rng.drops.next() < CONFIG.powerups.dropChancePerKill) {
       this.dropsThisRound += 1;

@@ -1,7 +1,7 @@
 import * as THREE from 'three';
 import { CONFIG, type PerkId, type PowerupId, type WeaponId } from '../config.js';
-import { AudioSystem } from '../audio/AudioSystem.js';
-import { CRATE_LOCATIONS, DOORS, FORGE, PERK_MACHINES, POWER_SWITCH, START_POSITIONS, WALL_BUYS, WINDOWS } from '../map/blueprint.js';
+import { AudioSystem, type AudioDiagnostics, type AudioEnemyEmitter, type AudioPoint } from '../audio/AudioSystem.js';
+import { CRATE_LOCATIONS, DOORS, FOG_BANKS, FORGE, PERK_MACHINES, POWER_SWITCH, START_POSITIONS, WALL_BUYS, WINDOWS, roomAt } from '../map/blueprint.js';
 import { SeededRng } from '../shared/rng.js';
 import type { MovementInput } from '../shared/movement.js';
 import { GameSimulation, type SimCrateState, type SimGrenade, type SimPlayer } from '../shared/GameSimulation.js';
@@ -167,6 +167,7 @@ export class PreludeScene {
   constructor(seed: number) {
     this.cosmeticRng = new SeededRng(seed ^ 0x5f356495);
     this.audio.setSeed(seed);
+    this.audio.setMode('menu');
     this.canvas = document.createElement('canvas');
     this.canvas.className = 'game-canvas';
     this.canvas.setAttribute('aria-label', 'Stahlbunker first-person viewport');
@@ -222,6 +223,8 @@ export class PreludeScene {
     this.sendAction = options.sendAction;
     this.cosmeticRng = new SeededRng(options.seed ^ 0x5f356495);
     this.audio.setSeed(options.seed);
+    this.audio.setMode('gameplay');
+    this.audio.resume();
     if (options.mode === 'solo') {
       this.simulation = new GameSimulation({ seed: options.seed, mode: 'solo', rosterSize: 1 });
       this.soloPlayer = {
@@ -313,6 +316,7 @@ export class PreludeScene {
   }
 
   command(name: string): boolean {
+    if (name === 'audio') return this.audio.runLocalizationGate();
     if (name === 'noclip') return this.controller?.toggleNoclip() ?? false;
     if (name === 'nav') return this.bunkerMap?.toggleNavDebug() ?? false;
     if (name === 'doors' && this.gameMode === 'solo') {
@@ -682,6 +686,14 @@ export class PreludeScene {
     return { ...this.metrics };
   }
 
+  getAudioDiagnostics(): AudioDiagnostics {
+    return this.audio.getDiagnostics();
+  }
+
+  setMasterVolume(value: number): void {
+    this.audio.setMasterVolume(value);
+  }
+
   private buildMenu(seed: number): void {
     this.menuRoot.name = 'menu-prelude';
     const rng = new SeededRng(seed);
@@ -1019,6 +1031,40 @@ export class PreludeScene {
     this.updateViewmodel(controller.getReadout(), delta);
     this.updateWonderEffects(delta * 1000);
     this.refreshSimulationVisuals();
+    const controllerReadout = controller.getReadout();
+    const simulationReadout = this.getSimulationReadout();
+    if (simulationReadout !== null) {
+      const listenerRoom = roomAt(controllerReadout.x, controllerReadout.y, controllerReadout.z);
+      this.audio.update({
+        elapsedMs: this.gameplayElapsed * 1000,
+        listener: {
+          x: controllerReadout.x,
+          y: controllerReadout.y + CONFIG.controller.eyeHeightM,
+          z: controllerReadout.z,
+          yaw: controllerReadout.yaw,
+          pitch: controllerReadout.pitch,
+          room: listenerRoom,
+        },
+        healthRatio: simulationReadout.hp / Math.max(1, simulationReadout.maxHp),
+        movementSpeedMps: Math.hypot(controllerReadout.vx, controllerReadout.vz),
+        grounded: controllerReadout.grounded,
+        powerOn: simulationReadout.powerOn,
+        roundKind: simulationReadout.roundKind,
+        enemies: simulationReadout.enemies.map((enemy) => ({
+          id: enemy.id,
+          kind: enemy.kind,
+          state: enemy.state,
+          speedTier: enemy.speedTier,
+          x: enemy.x,
+          y: enemy.y,
+          z: enemy.z,
+          room: WINDOWS.find((window) => window.id === enemy.barrierId)?.room
+            ?? FOG_BANKS.find((bank) => bank.id === enemy.barrierId)?.room
+            ?? roomAt(enemy.x, enemy.y, enemy.z),
+        } satisfies AudioEnemyEmitter)),
+        perkMachines: PERK_MACHINES,
+      });
+    }
     const interpolationAlpha = Math.min(1, delta / (CONFIG.coop.interpolationMs / 1000));
     for (const visual of this.remotePlayers.values()) {
       visual.group.position.lerp(visual.targetPosition, interpolationAlpha);
@@ -1185,6 +1231,18 @@ export class PreludeScene {
   }
 
   private processGameEvent(event: { type: string; [key: string]: unknown }): void {
+    const readout = this.getSimulationReadout();
+    const localPlayerId = readout?.localPlayerId ?? '';
+    const sourcePlayerId = typeof event.playerId === 'string' ? event.playerId : '';
+    if (event.type === 'weaponFired' && sourcePlayerId !== localPlayerId && isWeaponId(event.weaponId)) {
+      this.audio.playShot(event.weaponId, this.playerAudioPoint(sourcePlayerId), true);
+    }
+    if (event.type === 'weaponReloaded' && sourcePlayerId !== localPlayerId && isWeaponId(event.weaponId)) {
+      this.audio.playReload(event.weaponId, this.playerAudioPoint(sourcePlayerId));
+    }
+    if (event.type === 'meleeSwung' && sourcePlayerId !== localPlayerId) {
+      this.audio.playMelee(this.playerAudioPoint(sourcePlayerId));
+    }
     if (event.type === 'powerupCollected' && typeof event.powerupType === 'string') {
       this.pushHudEvent({ type: 'points', amount: 0, reason: event.powerupType });
     }
@@ -1196,6 +1254,91 @@ export class PreludeScene {
         this.playWonderEffect(event.weaponId, affected, { x: impact.x, y: impact.y, z: impact.z }, typeof event.playerId === 'string' ? event.playerId : '');
       }
     }
+
+    const point = this.eventAudioPoint(event);
+    const enemyKind = isEnemyKind(event.kind) ? event.kind : isEnemyKind(event.enemyKind) ? event.enemyKind : 'zombie';
+    const enemyId = typeof event.enemyId === 'number' ? event.enemyId : 0;
+    if (event.type === 'enemySpawned') this.audio.playWorldCue('enemySpawn', point, enemyKind, enemyId);
+    if (event.type === 'boardTorn') this.audio.playWorldCue('boardTorn', point);
+    if (event.type === 'boardRepaired') this.audio.playWorldCue('boardRepaired', point);
+    if (event.type === 'vaultStarted') this.audio.playWorldCue('vault', point);
+    if (event.type === 'playerDamaged') this.audio.playWorldCue('damage', point, enemyKind);
+    if (event.type === 'enemyKilled') this.audio.playWorldCue('enemyDeath', point, enemyKind, enemyId);
+    if (event.type === 'pointTransaction' && typeof event.amount === 'number' && event.amount > 0) this.audio.playWorldCue('purchase', point);
+    if (event.type === 'doorOpened') this.audio.playWorldCue('door', point);
+    if (event.type === 'weaponPurchased' || event.type === 'ammoPurchased' || event.type === 'grenadesPurchased') {
+      this.audio.playWorldCue('purchase', point);
+    }
+    if (event.type === 'crateStarted') this.audio.playWorldCue('crateStart', point);
+    if (event.type === 'crateSettled') this.audio.playWorldCue('crateSettle', point);
+    if (event.type === 'cratePuppe') this.audio.playWorldCue('cratePuppe', point);
+    if (event.type === 'crateCollected') this.audio.playWorldCue('crateCollect', point);
+    if (event.type === 'grenadeThrown' && sourcePlayerId !== localPlayerId) this.audio.playWorldCue('grenadeThrow', point);
+    if (event.type === 'grenadeExploded') this.audio.playWorldCue('explosion', point);
+    if (event.type === 'powerActivated') this.audio.playWorldCue('power', point);
+    if (event.type === 'perkPurchaseStarted') this.audio.playWorldCue('perkDrink', point);
+    if (event.type === 'perkGranted' && isPerkId(event.perkId)) this.audio.playPerkJingle(event.perkId, point);
+    if (event.type === 'forgeStarted') this.audio.playWorldCue('forgeStart', point);
+    if (event.type === 'forgeCompleted') this.audio.playWorldCue('forgeComplete', point);
+    if (event.type === 'forgeCancelled') this.audio.playWorldCue('forgeCancel', point);
+    if (event.type === 'playerSelfDamaged') this.audio.playWorldCue('damage', point);
+    if (event.type === 'powerupSpawned') this.audio.playWorldCue('powerupSpawn', point);
+    if (event.type === 'powerupCollected' && isPowerupId(event.powerupType)) this.audio.playPowerupCall(event.powerupType);
+    if (event.type === 'playerDowned') this.audio.playWorldCue('downed', point);
+    if (event.type === 'playerRevived') this.audio.playWorldCue('revived', point);
+    if (event.type === 'playerBledOut') this.audio.playWorldCue('bledOut', point);
+    if (event.type === 'playerReturned') this.audio.playWorldCue('returned', point);
+    if (event.type === 'gameOver') this.audio.playWorldCue('gameOver');
+    if (event.type === 'roundStarted' && typeof event.round === 'number') {
+      this.audio.playRoundSting(event.round, readout?.roundKind === 'wolves');
+    }
+    if (event.type === 'roundEnded') this.audio.playWorldCue('roundEnd');
+  }
+
+  private eventAudioPoint(event: { type: string; [key: string]: unknown }): AudioPoint | undefined {
+    if (typeof event.x === 'number' && typeof event.y === 'number' && typeof event.z === 'number') {
+      const authoredRoom = typeof event.barrierId === 'string'
+        ? WINDOWS.find((candidate) => candidate.id === event.barrierId)?.room ?? FOG_BANKS.find((candidate) => candidate.id === event.barrierId)?.room
+        : undefined;
+      return { x: event.x, y: event.y, z: event.z, room: authoredRoom ?? roomAt(event.x, event.y, event.z) };
+    }
+    if (typeof event.barrierId === 'string') {
+      const window = WINDOWS.find((candidate) => candidate.id === event.barrierId);
+      if (window !== undefined) return { x: window.x, y: window.y, z: window.z, room: window.room };
+    }
+    if (typeof event.doorId === 'string') {
+      const door = DOORS.find((candidate) => candidate.id === event.doorId);
+      if (door !== undefined) {
+        const x = (door.collider.minX + door.collider.maxX) * 0.5;
+        const y = (door.collider.minY + door.collider.maxY) * 0.5;
+        const z = (door.collider.minZ + door.collider.maxZ) * 0.5;
+        return { x, y, z, room: roomAt(x, y, z) };
+      }
+    }
+    if (typeof event.wallBuyId === 'string') {
+      const wall = WALL_BUYS.find((candidate) => candidate.id === event.wallBuyId);
+      if (wall !== undefined) return { x: wall.x, y: wall.y, z: wall.z, room: wall.room };
+    }
+    if (typeof event.locationId === 'string') {
+      const location = CRATE_LOCATIONS.find((candidate) => candidate.id === event.locationId);
+      if (location !== undefined) return { x: location.x, y: location.y, z: location.z, room: location.room };
+    }
+    if (isPerkId(event.perkId)) {
+      const machine = PERK_MACHINES.find((candidate) => candidate.id === event.perkId);
+      if (machine !== undefined) return { x: machine.x, y: machine.y, z: machine.z, room: machine.room };
+    }
+    if (event.type === 'powerActivated') {
+      return { x: POWER_SWITCH.x, y: POWER_SWITCH.y, z: POWER_SWITCH.z, room: POWER_SWITCH.room };
+    }
+    if (event.type.startsWith('forge')) return { x: FORGE.x, y: FORGE.y, z: FORGE.z, room: FORGE.room };
+    if (typeof event.playerId === 'string') return this.playerAudioPoint(event.playerId);
+    return undefined;
+  }
+
+  private playerAudioPoint(playerId: string): AudioPoint | undefined {
+    const player = this.getSimulationReadout()?.players.find((candidate) => candidate.id === playerId);
+    if (player === undefined) return undefined;
+    return { x: player.x, y: player.y + CONFIG.controller.eyeHeightM, z: player.z, room: roomAt(player.x, player.y, player.z) };
   }
 
   private playWonderEffect(
@@ -1310,6 +1453,7 @@ export class PreludeScene {
 
   private recordHit(headshot: boolean, killed: boolean): void {
     this.audio.playHitmarker();
+    this.audio.playWorldCue('damage');
     this.pushHudEvent({ type: 'hit', headshot, killed });
   }
 
@@ -1346,6 +1490,7 @@ export class PreludeScene {
 
   private readonly handleMelee = (): void => {
     this.meleeAnimationRemainingMs = CONFIG.melee.cooldownMs;
+    this.audio.playMelee();
     if (this.gameMode === 'coop') {
       this.sendAction?.({ type: 'melee' });
       return;
@@ -1388,6 +1533,7 @@ export class PreludeScene {
 
   private releaseGrenade(cookedMs: number): void {
     this.grenadeCookStartedAtMs = -1;
+    this.audio.playWorldCue('grenadeThrow');
     if (this.gameMode === 'coop') {
       this.sendAction?.({ type: 'grenade', cookedMs: Math.min(CONFIG.combat.grenadeFuseMs, Math.max(0, cookedMs)) });
       return;
@@ -1494,4 +1640,20 @@ function combatStats(state: CombatPlayerState): SceneSimulationReadout['stats'] 
     headshots: state.headshots,
     pointsEarned: state.pointsEarned,
   };
+}
+
+function isWeaponId(value: unknown): value is WeaponId {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(CONFIG.weapons, value);
+}
+
+function isPerkId(value: unknown): value is PerkId {
+  return typeof value === 'string' && Object.prototype.hasOwnProperty.call(CONFIG.perks, value);
+}
+
+function isPowerupId(value: unknown): value is PowerupId {
+  return value === 'instaKill' || value === 'doublePoints' || value === 'nuke' || value === 'maxAmmo' || value === 'carpenter';
+}
+
+function isEnemyKind(value: unknown): value is AudioEnemyEmitter['kind'] {
+  return value === 'zombie' || value === 'crawler' || value === 'wolf';
 }
